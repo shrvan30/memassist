@@ -69,3 +69,16 @@ def test_memory_stats(mem):
 def test_render_core_memory_shape(mem):
     rendered = mem.render_core_memory()
     assert "<persona>" in rendered and "<human>" in rendered
+
+
+def test_conversation_search_date_valid_range(mem):
+    mem.record_event("user", EVENT_MESSAGE, "hello there")
+    out = mem.conversation_search_date("2000-01-01", "2100-01-01")
+    assert "hello there" in out
+
+
+def test_conversation_search_date_malformed_returns_error(mem):
+    # Malformed dates must come back as a correctable "Error: ..." string, not a
+    # silent "no matches" (the T3b gap) and not an exception.
+    out = mem.conversation_search_date("not-a-date", "also-bad")
+    assert out.startswith("Error:")

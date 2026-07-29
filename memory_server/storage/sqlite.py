@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
@@ -18,6 +19,32 @@ EVENT_MESSAGE = "message"
 EVENT_TOOL_CALL = "tool_call"
 EVENT_TOOL_RESULT = "tool_result"
 EVENT_PRESSURE_WARNING = "pressure_warning"
+
+
+def _normalize_date_bound(value: str, *, is_end: bool) -> str:
+    """Validate and normalize a date/datetime search bound.
+
+    Accepts ``YYYY-MM-DD`` (expanded to the start or end of that day) or a full
+    ``YYYY-MM-DD HH:MM:SS`` timestamp, returning a normalized
+    ``YYYY-MM-DD HH:MM:SS`` string. Raises ``ValueError`` on anything else so the
+    caller — and the model driving conversation_search_date — gets a clear signal
+    to correct the input instead of a silent empty result.
+    """
+    text = (value or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    try:
+        day = datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(
+            f"Invalid date {value!r}: use 'YYYY-MM-DD' (e.g. 2026-07-24) "
+            "or 'YYYY-MM-DD HH:MM:SS'."
+        ) from None
+    return day.strftime("%Y-%m-%d") + (" 23:59:59" if is_end else " 00:00:00")
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS core_blocks (
@@ -250,11 +277,13 @@ class SQLiteStore:
     ) -> tuple[list[dict], int]:
         """Search recall memory within an inclusive date range.
 
-        ``start``/``end`` are ``YYYY-MM-DD`` (or full timestamps). Bare dates are
-        expanded to cover the whole day.
+        ``start``/``end`` are ``YYYY-MM-DD`` (or full ``YYYY-MM-DD HH:MM:SS``
+        timestamps); bare dates expand to cover the whole day. Raises
+        ``ValueError`` on a malformed date so the caller can surface a
+        correctable error instead of a silently empty result.
         """
-        start_ts = start if len(start) > 10 else f"{start} 00:00:00"
-        end_ts = end if len(end) > 10 else f"{end} 23:59:59"
+        start_ts = _normalize_date_bound(start, is_end=False)
+        end_ts = _normalize_date_bound(end, is_end=True)
 
         conditions = ["created_at >= ?", "created_at <= ?"]
         params: list[object] = [start_ts, end_ts]

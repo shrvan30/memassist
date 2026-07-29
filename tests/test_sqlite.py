@@ -76,6 +76,26 @@ def test_search_messages_by_date(store):
     assert total_all == 2
 
 
+def test_search_messages_by_date_rejects_malformed(store):
+    # Malformed bounds must raise (so the handler surfaces a correctable error and
+    # the model self-corrects) instead of silently returning no matches.
+    for bad_start, bad_end in [
+        ("not-a-date", "also-bad"),
+        ("2026-13-45", "2026-07-31"),  # impossible month/day
+        ("07/24/2026", "2026-07-31"),  # wrong separator/order
+        ("2026-07-24", "yesterday"),
+        ("", "2026-07-31"),
+    ]:
+        with pytest.raises(ValueError):
+            store.search_messages_by_date(bad_start, bad_end)
+
+
+def test_search_messages_by_date_accepts_full_timestamp(store):
+    store.add_message("s", "user", EVENT_MESSAGE, "noon note", created_at="2026-07-24 12:00:00")
+    rows, total = store.search_messages_by_date("2026-07-24 11:00:00", "2026-07-24 13:00:00")
+    assert total == 1 and rows[0]["content"] == "noon note"
+
+
 def test_count_messages(store):
     assert store.count_messages() == 0
     store.add_message("s", "user", EVENT_MESSAGE, "hi")
