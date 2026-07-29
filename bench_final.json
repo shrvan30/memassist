@@ -1,0 +1,174 @@
+{
+  "total": 96.0,
+  "possible": 100,
+  "checks": [
+    {
+      "tier": "T1",
+      "id": "T1a",
+      "points": 4,
+      "earned": 4.0,
+      "note": "served_by=groq cooling=True"
+    },
+    {
+      "tier": "T1",
+      "id": "T1b",
+      "points": 4,
+      "earned": 4.0,
+      "note": "served_by=groq cooling=False"
+    },
+    {
+      "tier": "T1",
+      "id": "T1c",
+      "points": 4,
+      "earned": 4.0,
+      "note": "transient=RateLimitError zero_quota=ProviderPermanentError 404=ProviderPermanentError"
+    },
+    {
+      "tier": "T2",
+      "id": "T2a",
+      "points": 4,
+      "earned": 4.0,
+      "note": "<persona> I am MemAssist, a personal AI assistant with long-"
+    },
+    {
+      "tier": "T2",
+      "id": "T2b",
+      "points": 4,
+      "earned": 4.0,
+      "note": "Error: Update would exceed the 2000-character limit for the "
+    },
+    {
+      "tier": "T2",
+      "id": "T2c",
+      "points": 4,
+      "earned": 4.0,
+      "note": "(I do not know anything about the user yet.)\nName: Bob. [inf"
+    },
+    {
+      "tier": "T3",
+      "id": "T3a",
+      "points": 4,
+      "earned": 4.0,
+      "note": "total=1"
+    },
+    {
+      "tier": "T3",
+      "id": "T3b",
+      "points": 4,
+      "earned": 0.0,
+      "note": "No messages in recall memory match dates not-a-dat"
+    },
+    {
+      "tier": "T3",
+      "id": "T3c",
+      "points": 4,
+      "earned": 4.0,
+      "note": "paged"
+    },
+    {
+      "tier": "T4",
+      "id": "T4a",
+      "points": 5,
+      "earned": 5.0,
+      "note": "Archival search for 'lease' \u2014 1 passage(s) stored, page 0: 1"
+    },
+    {
+      "tier": "T4",
+      "id": "T4b",
+      "points": 5,
+      "earned": 5.0,
+      "note": "injected=1"
+    },
+    {
+      "tier": "T4",
+      "id": "T4c",
+      "points": 8,
+      "earned": 8.0,
+      "note": "queue 20->15 pressure_after=False"
+    },
+    {
+      "tier": "T5",
+      "id": "T5a",
+      "points": 4,
+      "earned": 4.0,
+      "note": "'Which medication makes him unwell?' -> 'He is allergic to penicillin and breaks out '"
+    },
+    {
+      "tier": "T5",
+      "id": "T5b",
+      "points": 4,
+      "earned": 4.0,
+      "note": "'What vehicle does he own?' -> 'He drives a red Toyota Corolla with a dented'"
+    },
+    {
+      "tier": "T5",
+      "id": "T5c",
+      "points": 4,
+      "earned": 4.0,
+      "note": "'Where was his child delivered?' -> \"The user's daughter Mira was born in Pune in\""
+    },
+    {
+      "tier": "T5",
+      "id": "T5d",
+      "points": 4,
+      "earned": 4.0,
+      "note": "'What dish does she enjoy most?' -> 'Her favourite meal is grilled salmon with le'"
+    },
+    {
+      "tier": "T6",
+      "id": "T6a",
+      "points": 3,
+      "earned": 3.0,
+      "note": "Error: 'rm_rf_everything' is not a memory tool."
+    },
+    {
+      "tier": "T6",
+      "id": "T6b",
+      "points": 3,
+      "earned": 3.0,
+      "note": "Error: invalid arguments for core_memory_append: 2"
+    },
+    {
+      "tier": "T6",
+      "id": "T6c",
+      "points": 4,
+      "earned": 4.0,
+      "note": "calls=3"
+    },
+    {
+      "tier": "T7",
+      "id": "T7a",
+      "points": 3,
+      "earned": 3.0,
+      "note": "Error: archival memory is not available in this se"
+    },
+    {
+      "tier": "T7",
+      "id": "T7b",
+      "points": 3,
+      "earned": 3.0,
+      "note": "Error: invalid arguments for core_memory_append: 1"
+    },
+    {
+      "tier": "T7",
+      "id": "T7c",
+      "points": 4,
+      "earned": 4.0,
+      "note": "\"I've hit the free-tier limit on every language-model provide\""
+    },
+    {
+      "tier": "T8",
+      "id": "T8a",
+      "points": 5,
+      "earned": 5.0,
+      "note": "source='stated'"
+    },
+    {
+      "tier": "T8",
+      "id": "T8b",
+      "points": 5,
+      "earned": 5.0,
+      "note": "(I do not know anything about the user yet.)\nWorks as a nurs"
+    }
+  ]
+}

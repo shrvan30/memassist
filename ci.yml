@@ -1,0 +1,35 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }   # gitleaks needs history
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+
+      - run: pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit + security tests (no LLM keys)
+        run: pytest tests/ -m "not llm" -q
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+
+      - name: Dependency audit
+        run: pip-audit -r requirements.txt
+
+  # Nightly smoke benchmark (real free-tier keys via repo secrets).
+  # Manual trigger only until quota impact is measured.
+  # bench-smoke:
+  #   if: github.event_name == 'workflow_dispatch'
+  #   ...

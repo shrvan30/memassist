@@ -1,0 +1,24 @@
+# External MCP server registry — max 3 active (schemas cost context tokens).
+# trust: internal = pass-through · untrusted = results MUST pass sanitizer.
+# Verify package names against current MCP docs before first run.
+
+servers:
+  memgpt-memory:
+    transport: stdio
+    command: python
+    args: ["-m", "memory_server"]
+    trust: internal
+
+  ddg-search:
+    transport: stdio
+    command: uvx
+    args: ["duckduckgo-mcp-server"]
+    trust: untrusted          # web content = hostile until sanitized
+    # optional upgrade: swap for Tavily MCP when TAVILY_API_KEY is set
+
+  filesystem:
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
+    trust: untrusted
+    write_gate: true          # all writes require human_interrupt approval

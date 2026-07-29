@@ -1,0 +1,11 @@
+# Phase 1 (MVP) runtime dependencies — keep in sync with pyproject.toml
+openai>=1.40          # OpenAI-compatible client for all router providers
+pyyaml>=6.0           # llm/providers.yaml
+chromadb>=0.5
+sentence-transformers>=2.7  # local bge-small-en-v1.5 embeddings (384-d), no API key
+streamlit>=1.30
+pydantic>=2.5
+python-dotenv>=1.0
+
+# Dev / test
+pytest>=7.4

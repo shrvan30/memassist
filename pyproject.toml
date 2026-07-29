@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "memassist"
+version = "0.1.0"
+description = "MemGPT-style personal assistant with infinite memory"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.40",          # OpenAI-compatible client for every router provider
+    "pyyaml>=6.0",           # llm/providers.yaml
+    "chromadb>=0.5",
+    "sentence-transformers>=2.7",  # local bge-small-en-v1.5 embeddings (384-d)
+    "streamlit>=1.30",
+    "pydantic>=2.5",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[tool.setuptools]
+packages = ["agent", "llm", "memory_server", "memory_server.storage"]
+py-modules = ["config", "assembly"]
+
+[tool.setuptools.package-data]
+llm = ["providers.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
