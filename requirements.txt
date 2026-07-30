@@ -7,5 +7,7 @@ streamlit>=1.30
 pydantic>=2.5
 python-dotenv>=1.0
 
-# Dev / test
+# Dev / test / CI (ci.yml installs this file and runs all three)
 pytest>=7.4
+ruff>=0.6             # lint gate
+pip-audit>=2.7        # dependency audit gate

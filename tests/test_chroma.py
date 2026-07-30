@@ -48,11 +48,11 @@ def test_search_on_empty_store(archival):
 
 def test_persistence_across_reopen(tmp_path):
     path = str(tmp_path / "chroma")
-    store = ArchivalStore(path)
+    store = ArchivalStore(path, embed_fn=hashing_embedding)
     store.insert("Persisted passage about quantum computing.")
     assert store.count() == 1
 
-    reopened = ArchivalStore(path)
+    reopened = ArchivalStore(path, embed_fn=hashing_embedding)
     assert reopened.count() == 1
     items, _ = reopened.search("quantum", top_k=1)
     assert items and "quantum" in items[0]["content"].lower()

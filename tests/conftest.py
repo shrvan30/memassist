@@ -6,7 +6,7 @@ import pytest
 
 import config
 from memory_server.memory_tools import MemoryTools
-from memory_server.storage.chroma import ArchivalStore
+from memory_server.storage.chroma import ArchivalStore, hashing_embedding
 from memory_server.storage.sqlite import SQLiteStore
 
 # Small char limit so the core-block overflow path is easy to exercise.
@@ -30,7 +30,11 @@ def archival(tmp_path):
     # A unique on-disk path per test → real isolation. (Chroma's in-memory
     # EphemeralClient shares one global system across the process, so it would
     # leak data between tests; a per-test path avoids that entirely.)
-    return ArchivalStore(str(tmp_path / "chroma"))
+    #
+    # The hashing embedder is injected as a test double so the suite needs no
+    # bge-small download: CI stays offline and fast. Semantic retrieval quality
+    # is the benchmark's job (bench/ T5), and it uses the real model.
+    return ArchivalStore(str(tmp_path / "chroma"), embed_fn=hashing_embedding)
 
 
 @pytest.fixture

@@ -22,7 +22,6 @@ if str(ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 import assembly  # noqa: E402
-import config  # noqa: E402
 from agent.token_budget import usage_fraction  # noqa: E402
 
 st.set_page_config(page_title="MemAssist", page_icon="🧠", layout="wide")
