@@ -7,6 +7,8 @@ to initialize, the assistant still runs with core + recall memory.
 
 from __future__ import annotations
 
+from typing import Any
+
 import config
 import llm
 from agent.loop import AgentLoop
@@ -81,6 +83,69 @@ def build_memory(
     )
 
 
+# One saver per DSN per process. Every session's loop shares it: the pool is
+# the expensive part, and the thread id is what keeps sessions apart.
+_checkpointers: dict[str, Any] = {}
+
+
+def build_checkpointer(backend: str | None = None, dsn: str | None = None):
+    """Open the checkpointer for the active backend — the stores' sibling.
+
+    Turn state was the last thing still living only in process memory. Core,
+    recall and archival memory were already in a database, so an API restart
+    lost nothing durable — but it lost every *suspended* turn, and a turn
+    suspended on a human approval is precisely the one that is likely to
+    outlive the process it started in.
+
+    Pairing the checkpointer with the storage backend keeps that a single
+    decision: choose Postgres and turn state persists with everything else.
+    """
+    backend = (backend or config.STORAGE_BACKEND).lower()
+    if backend != "postgres":
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        return InMemorySaver()
+
+    dsn = dsn or config.POSTGRES_DSN
+    if not dsn:
+        raise RuntimeError(
+            "MEMASSIST_STORAGE_BACKEND=postgres but MEMASSIST_POSTGRES_DSN is unset."
+        )
+    saver = _checkpointers.get(dsn)
+    if saver is None:
+        from langgraph.checkpoint.postgres import PostgresSaver
+        from psycopg.rows import dict_row
+        from psycopg_pool import ConnectionPool
+
+        # PostgresSaver requires autocommit (it runs its own migrations) and
+        # dict rows. A pool rather than one connection because a turn runs on
+        # an SSE worker thread while the request thread reads state.
+        pool = ConnectionPool(
+            dsn,
+            min_size=1,
+            max_size=int(config.CHECKPOINTER_POOL_MAX),
+            kwargs={"autocommit": True, "row_factory": dict_row},
+            open=True,
+        )
+        saver = PostgresSaver(pool)
+        saver.setup()  # idempotent DDL, same contract as the storage migration
+        _checkpointers[dsn] = saver
+    return saver
+
+
+def close_checkpointers() -> None:
+    """Close the checkpointer pools. Called on API shutdown.
+
+    A pool keeps worker threads alive, so leaving it open makes a clean process
+    exit hang rather than exit.
+    """
+    for saver in _checkpointers.values():
+        conn = getattr(saver, "conn", None)
+        if hasattr(conn, "close"):
+            conn.close()
+    _checkpointers.clear()
+
+
 def ledger_dsn(db_path: str | None = None) -> str:
     """Where the provider-usage ledger lives — same store as everything else.
 
@@ -118,6 +183,7 @@ def build_loop(
     memory: MemoryTools | None = None,
     router: "llm.Router | None" = None,
     external: ExternalTools | None = None,
+    session_id: str | None = None,
 ) -> AgentLoop:
     external = build_tools() if external is None else external
     return AgentLoop(
@@ -128,4 +194,9 @@ def build_loop(
         pressure_threshold=config.PRESSURE_THRESHOLD,
         max_heartbeats=config.MAX_HEARTBEATS,
         external=external,
+        checkpointer=build_checkpointer(),
+        # The session id IS the thread id, so a restarted process addresses the
+        # same thread. Without it a rebuilt loop would get a fresh uuid and the
+        # persisted checkpoint would be unreachable — durable but unaddressable.
+        thread_id=session_id,
     )
