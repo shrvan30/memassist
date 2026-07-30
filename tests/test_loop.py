@@ -114,8 +114,7 @@ def test_memory_pressure_warning_injected(mem):
     router = FakeRouter([result(tool_calls=[tool("send_message", '{"text":"ok"}')], prompt_tokens=50)])
     loop = make_loop(mem, router)
     # Simulate a nearly-full context from a previous turn (limit is 1000).
-    loop.last_input_tokens = 800
-    loop.last_limit = 1000
+    loop.seed_context(input_tokens=800, limit=1000)
 
     loop.step("please continue")
 
@@ -126,6 +125,37 @@ def test_memory_pressure_warning_injected(mem):
     ]
     assert injected, "expected a memory-pressure warning in the message queue"
     assert mem.store.count_messages(event_types=("pressure_warning",)) == 1
+
+
+def test_fifo_accumulates_across_turns_and_reset_clears_it(mem):
+    reply = lambda: result(  # noqa: E731
+        tool_calls=[tool("send_message", '{"text":"ok"}')], prompt_tokens=42
+    )
+    loop = make_loop(mem, FakeRouter([], default=reply))
+
+    loop.step("first")
+    after_one = len(loop.messages)
+    loop.step("second")
+    assert len(loop.messages) > after_one, "turn state must survive between steps"
+    assert loop.last_input_tokens == 42
+
+    loop.reset()
+    assert loop.messages == []
+    assert loop.last_input_tokens == 0
+    assert loop.served_by is None
+    # Saved memory is deliberately untouched by a reset.
+    assert mem.store.count_messages(event_types=("message",)) > 0
+
+
+def test_seed_context_sets_state_without_running_a_turn(mem):
+    loop = make_loop(mem, FakeRouter([]))
+    preload = [{"role": "user", "content": "old"}]
+
+    loop.seed_context(messages=preload, input_tokens=800, limit=1000)
+
+    assert loop.messages == preload
+    assert (loop.last_input_tokens, loop.last_limit) == (800, 1000)
+    assert loop.under_pressure()
 
 
 def test_pressure_uses_active_provider_window(mem):

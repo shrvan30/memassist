@@ -345,7 +345,7 @@ def t4b_pressure_warning_injected(tmp):
     mem = make_memory(tmp)
     router = FakeRouter([result(tool_calls=[tc("send_message", '{"text":"ok"}')], prompt_tokens=50)])
     loop = make_loop(mem, router)
-    loop.last_input_tokens, loop.last_limit = 800, 1000  # 80% > 70%
+    loop.seed_context(input_tokens=800, limit=1000)  # 80% > 70%
     loop.step("carry on")
     injected = [
         m for m in loop.messages
@@ -386,11 +386,12 @@ def t4c_fifo_eviction_after_offload(tmp):
     loop = make_loop(mem, router, planning_context_limit=2800)
     # 20 stale turns already in context, over the threshold.
     filler = "recap of an earlier exchange, " * 10
+    preload: list[dict] = []
     for i in range(10):
-        loop.messages.append({"role": "user", "content": f"old user message {i}: {filler}"})
-        loop.messages.append({"role": "assistant", "content": f"old reply {i}: {filler}"})
+        preload.append({"role": "user", "content": f"old user message {i}: {filler}"})
+        preload.append({"role": "assistant", "content": f"old reply {i}: {filler}"})
+    loop.seed_context(messages=preload, input_tokens=2400, limit=2800)
     before = len(loop.messages)
-    loop.last_input_tokens, loop.last_limit = 2400, 2800
 
     loop.step("please summarize and continue")
 
