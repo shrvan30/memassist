@@ -2,6 +2,8 @@
 openai>=1.40          # OpenAI-compatible client for all router providers
 pyyaml>=6.0           # llm/providers.yaml
 langgraph>=0.2        # graph/ owns control flow only — never provider calls
+langchain-mcp-adapters>=0.3   # external MCP servers as tools (mcp_servers.yaml)
+mcp>=1.29,<2          # PINNED: adapters 0.3.1 import RequestContext, dropped in mcp 2.0
 chromadb>=0.5
 sentence-transformers>=2.7  # local bge-small-en-v1.5 embeddings (384-d), no API key
 streamlit>=1.30
