@@ -169,3 +169,27 @@ def test_registry_allowlists_are_a_subset_of_what_servers_export():
         if allow and gated:
             orphans = set(gated) - set(allow)
             assert not orphans, f"{name}: gated but not loaded: {sorted(orphans)}"
+
+
+# --- transports -----------------------------------------------------------
+def test_stdio_connection_shape():
+    from mcp_client import _connection
+
+    conn = _connection({"transport": "stdio", "command": "uvx", "args": ["srv"]})
+    assert conn == {"transport": "stdio", "command": "uvx", "args": ["srv"]}
+
+
+def test_streamable_http_connection_shape():
+    from mcp_client import _connection
+
+    conn = _connection({"transport": "streamable_http", "url": "http://memory-mcp:8090/mcp"})
+    assert conn == {"transport": "streamable_http", "url": "http://memory-mcp:8090/mcp"}
+
+
+def test_connection_expands_environment_variables(monkeypatch):
+    # A compose file points at a service name; the registry must not hardcode it.
+    from mcp_client import _connection
+
+    monkeypatch.setenv("MEMASSIST_MCP_URL", "http://memory-mcp:8090/mcp")
+    conn = _connection({"transport": "http", "url": "$MEMASSIST_MCP_URL"})
+    assert conn["url"] == "http://memory-mcp:8090/mcp"

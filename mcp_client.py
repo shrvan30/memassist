@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -82,14 +83,7 @@ class ExternalTools:
             return self
 
         self._start_loop()
-        connections = {
-            name: {
-                "transport": spec.get("transport", "stdio"),
-                "command": spec["command"],
-                "args": list(spec.get("args", [])),
-            }
-            for name, spec in self._specs.items()
-        }
+        connections = {name: _connection(spec) for name, spec in self._specs.items()}
         self._client = MultiServerMCPClient(connections)
         # Per server, not one aggregate call: a server that will not start then
         # costs only its own tools, and each tool's owner (and therefore its
@@ -222,6 +216,25 @@ class ExternalTools:
 
 
 # --- helpers --------------------------------------------------------------
+def _connection(spec: dict) -> dict:
+    """Registry entry -> a langchain-mcp-adapters connection.
+
+    stdio spawns a subprocess; streamable_http talks to a service that is
+    already running (its own container, its own healthcheck). Environment
+    expansion means a compose file can point at a service name without the
+    registry hardcoding one.
+    """
+    transport = spec.get("transport", "stdio")
+    if transport in ("streamable_http", "streamable-http", "http"):
+        url = os.path.expandvars(str(spec["url"]))
+        return {"transport": "streamable_http", "url": url}
+    return {
+        "transport": "stdio",
+        "command": spec["command"],
+        "args": [os.path.expandvars(str(a)) for a in spec.get("args", [])],
+    }
+
+
 def _as_text(result: Any) -> str:
     """Flatten an MCP CallToolResult (or whatever the adapter returned) to text."""
     content = getattr(result, "content", result)
