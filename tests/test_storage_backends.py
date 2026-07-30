@@ -59,10 +59,15 @@ def _postgres_backend(tmp_path):
         default_human=config.DEFAULT_HUMAN,
         core_block_char_limit=TEST_CORE_LIMIT,
     )
-    # The hashing embedder is 512-d; pgvector fixes the column at 384, so the
-    # test double is truncated to fit. Retrieval ORDER is what matters here —
+    # pgvector fixes the column at 384, so the test double must hash INTO 384
+    # buckets — never truncate a 512-d one to fit. Truncation drops whichever
+    # buckets land past 384, and a short query is one bucket: `hashing_embedding
+    # ("lease")` is non-zero only at index 463, so `[:384]` made it the zero
+    # vector. Cosine distance to a zero vector is NaN, ORDER BY NaN is arbitrary,
+    # and the retrieval-order assertion below was decided by physical row order —
+    # passing alone, failing in a full run. Retrieval ORDER is what matters here;
     # semantic quality is the benchmark's job (T5), with the real model.
-    archival = PgVectorStore(dsn, embed_fn=lambda t: hashing_embedding(t)[:384])
+    archival = PgVectorStore(dsn, embed_fn=lambda t: hashing_embedding(t, dim=384))
     store._schema_name = schema
     return store, archival
 
