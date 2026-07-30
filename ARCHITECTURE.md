@@ -1,7 +1,7 @@
 # ARCHITECTURE — MemAssist (as-built)
 
 This document describes MemAssist **as the code actually is** at the end of
-Phase 3 (deterministic bench 110/110). It is a developer map: the
+Phase 4 (deterministic bench 110/110, on either storage backend). It is a developer map: the
 file layout, the data flows through one turn, and the failure-handling designs —
 in particular the Gemini `ProviderPermanentError` fix.
 
@@ -49,16 +49,23 @@ memassist/
     storage/
       sqlite.py           core_blocks + messages (recall); date-bound validation
       chroma.py           ArchivalStore: persistent Chroma, cosine, source metadata
+      postgres.py         PostgresStore: the same surface, Postgres dialect
+      pgvector_store.py   PgVectorStore: vector(384), cosine, SQL paging
+      migrate_to_postgres.py  SQLite+Chroma -> Postgres, idempotent
       embedder.py         Local bge-small-en-v1.5, 384-d, L2-normalized (lazy load)
       migrate_embeddings.py   One-time 512-d → 384-d re-embed migration
 
-  app/streamlit_app.py    Phase 1 chat UI: live memory sidebar + provider badge
+  api/                    FastAPI service (Phase 4).
+    main.py               SSE /chat, approve/deny, memory-inspector reads
+    sessions.py           session id -> AgentLoop -> checkpointer thread
+  web/                    Next.js + Tailwind UI; PARITY.md tracks the cutover
 
   bench/                  Deterministic, offline benchmark (110 pts). `python -m bench`
   tests/                  pytest suite (120 tests, no API keys, no provider calls)
   workspace/              The filesystem server's jail — nothing else is reachable
 
-  Makefile  pyproject.toml  requirements.txt  ci.yml
+  Dockerfile  web/Dockerfile  docker-compose.yml
+  Makefile  pyproject.toml  requirements.txt  .github/workflows/ci.yml
   .mcp.json  mcp_servers.yaml   MCP registration (server is Phase 2)
 ```
 
@@ -70,7 +77,7 @@ The loop depends on nothing concrete. It talks to exactly two interfaces:
 |---|---|---|---|
 | `LLMRouter` | `chat`, `context_window`, `min_context_window` | `llm.router.Router` | (stable) |
 | `MemoryInterface` | `render_core_memory`, `memory_stats`, `dispatch`, `record_event` | `memory_server.memory_tools.MemoryTools` | (stable) |
-| `ExternalToolset` | `names`, `trust_of`, `is_gated`, `jail_of`, `call` | `mcp_client.ExternalTools` | Phase 4 → HTTP transport |
+| `ExternalToolset` | `names`, `trust_of`, `is_gated`, `jail_of`, `call` | `mcp_client.ExternalTools` | (stable; stdio or HTTP) |
 
 Because the loop sees only these, later phases are local changes: Phase 2 swaps
 the `MemoryInterface` implementation for an MCP client; Phase 3 swaps SQLite for
@@ -339,9 +346,14 @@ Current: **bench 110/110** (T1–T8 100, T11 10), pytest green, CI green.
   external schemas now ride in every prompt. Spec §5.1 caps active servers at 3
   for exactly this reason; trimming to the tools actually used is the obvious
   next economy.
-- **Phase 4+ (not built):** Postgres/pgvector, FastAPI/Next.js, MCP over
-  Streamable HTTP, and Langfuse tracing. The `MemoryInterface` and
-  `ExternalToolset` seams are what keep those additive.
+- **Phase 5 (not built):** the Mistral consolidation lane with the `sensitive`
+  filter (T10), Langfuse tracing tagged by provider, and the CD deploy
+  pipeline. The `MemoryInterface` and `ExternalToolset` seams are what keep
+  those additive.
+- **The checkpointer is still `InMemorySaver`.** Turn state does not survive
+  an API restart and a second replica would not see it — both move together
+  when a Postgres checkpointer lands. Saved memory (core/recall/archival) is
+  unaffected: that is already in the database.
 
 ---
 
@@ -449,3 +461,84 @@ model not to retry or route around it.
 
 Verified live against the real filesystem server: the file does not exist before
 approval and does after.
+
+---
+
+## 12. Phase 4 — the production stack
+
+### Storage: two backends, one surface
+
+`assembly.build_stores()` is the only module that knows which backend is
+running. Config follows the DSN — setting `MEMASSIST_POSTGRES_DSN` is enough.
+
+| | SQLite + Chroma | Postgres + pgvector |
+|---|---|---|
+| Core + recall | `sqlite.py` | `postgres.py` |
+| Archival | Chroma, cosine | `vector(384)`, `<=>`, HNSW |
+| Budget ledger | one file | same DSN |
+| Paging | score all, slice locally | `LIMIT/OFFSET` in SQL |
+| Setup | none | a database |
+
+Differences are dialect, never behaviour: `created_at` is a real `timestamptz`
+in Postgres but is formatted back to `YYYY-MM-DD HH:MM:SS` on read, so both
+backends hand callers identical rows. `tests/test_storage_backends.py` runs one
+suite against both (each Postgres test in a throwaway schema), and the benchmark
+scores 110/110 either way.
+
+**The ledger matters more than it looks.** In a container the SQLite file is
+ephemeral, so a Postgres deployment that left the ledger on disk would hand the
+router a fresh, empty budget on every restart and cheerfully re-spend a free
+tier it had already exhausted.
+
+`migrate_to_postgres.py` re-embeds archival passages **from stored text** rather
+than copying vectors: text is the source of truth, re-embedding is deterministic
+with the same local model, and it stays correct even if the two stores ever
+disagreed on dimensionality. Idempotent, and it never deletes from the source.
+
+### API: sessions are checkpointer threads
+
+One session id maps to one `AgentLoop`, and each loop owns one checkpointer
+thread — so a turn suspended on an approval is still suspended when the next
+HTTP request arrives. Memory is shared across sessions because it is the
+*user's* memory; only the in-context window is per-session, which is exactly the
+MemGPT split.
+
+One turn at a time per session (409 otherwise): concurrent turns would
+interleave writes into one thread. Sending a message while an approval is
+outstanding is also a 409.
+
+**What "SSE token streaming" means here.** The user-facing reply is the
+*argument* of a `send_message` tool call, not the model's `content` field —
+content is internal monologue the user must never see (§3). Streaming provider
+tokens would therefore stream the wrong text, and streaming tool-call argument
+deltas across four providers is exactly the fragility the flat-schema rule
+exists to prevent. So what streams is the **turn**: every tool call, tool
+result, eviction and security decision arrives live, and the reply is chunked
+into `token` events. The live feed is sourced from `record_event` — the audit
+stream was already being written, so mirroring it to subscribers needed no graph
+changes at all.
+
+### Deployment
+
+`docker compose up --build` brings up web → api → memory-mcp → postgres, each
+waiting on its dependency being **healthy** rather than merely started. The
+Postgres probe passes `-d` as well as `-U`, because `pg_isready` reports ready
+while `initdb` is still running.
+
+Two image decisions worth naming:
+
+- **bge-small is baked into a build LAYER**, not a volume. A volume would still
+  pay the ~130 MB download once per fresh environment and would make container
+  start depend on Hugging Face being reachable.
+- **CPU-only torch is installed first**, from the PyTorch CPU index. The default
+  wheel is 527 MB and drags ~2 GB of `nvidia_*` wheels behind it — none of which
+  a container that embeds 384-d vectors on CPU can use.
+
+### Tool-schema economy
+
+Every tool schema rides in every prompt, on every turn, for the life of the
+session. The registry's `tools:` allowlist filters at load, so the *registry*
+decides what the context budget is spent on rather than whatever a server
+happens to export: the filesystem server's 14 tools became 4, and 16 external
+schemas became 6. Deny-by-default is unaffected — a dropped tool is simply
+absent rather than soft-blocked.

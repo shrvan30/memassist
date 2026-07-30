@@ -14,7 +14,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+
+# CPU-only torch, installed FIRST so it satisfies sentence-transformers'
+# dependency before pip resolves the default wheel. The default pulls CUDA:
+# torch is 527 MB and it drags ~2 GB of nvidia_* wheels behind it, none of which
+# a container that only embeds 384-d vectors on CPU can use.
+RUN pip install --index-url https://download.pytorch.org/whl/cpu torch \
+ && pip install -r requirements.txt
 
 # Bake bge-small into an image LAYER. Without this every container start pays a
 # ~130 MB download before the first archival write, which also makes startup
