@@ -5,7 +5,7 @@
 
 PY ?= python
 
-.PHONY: help install api web dev test bench mcp mcp-http up down clean
+.PHONY: help install api web test bench mcp mcp-http up down clean
 
 help:
 	@echo "make install    - install runtime + dev dependencies (editable)"
@@ -13,7 +13,6 @@ help:
 	@echo "make down       - stop the stack (add -v to drop the pgdata volume)"
 	@echo "make api        - FastAPI on :8000"
 	@echo "make web        - Next.js on :3000"
-	@echo "make dev        - Streamlit on :8501 (Phase 1 UI)"
 	@echo "make test       - pytest (no keys, no network)"
 	@echo "make bench      - benchmark harness (add LIVE=1 for a live smoke)"
 	@echo "make mcp        - MCP memory server on stdio"
@@ -34,9 +33,6 @@ api:
 
 web:
 	cd web && npm run dev
-
-dev:
-	$(PY) -m streamlit run app/streamlit_app.py
 
 test:
 	$(PY) -m pytest

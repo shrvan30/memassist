@@ -6,8 +6,8 @@ A personal AI assistant implementing the MemGPT architecture (Packer et al.,
 own memory via tool calls, paging between context ("RAM") and storage ("disk").
 Runs at $0/month on 4 free-tier providers behind a failover router. Orchestrated
 by LangGraph; uses external MCP servers as tools behind a security layer.
-STATUS: Phases 1-3 built. Bench **110/110** (T1-T8 100 + T11 security 10);
-CI green. Next: Phase 4 (see BENCHMARKS.md).
+STATUS: Phases 1-4 built. Bench **110/110** on BOTH storage backends; CI
+green (dual-backend matrix + node job). Next: Phase 5 (see BENCHMARKS.md).
 
 ## Read first
 - `PROJECT_SPEC.md` — architecture, tools, LangGraph design, security, CI/CD,
@@ -36,8 +36,11 @@ Ponytail active: prefer smallest diffs, but the spec's architectural boundaries 
 - **Security:** every external tool result passes `security/sanitizer.py`;
   memory writes pass `security/guards.py`. See spec §6. Non-negotiable.
 - **Embeddings: LOCAL ONLY** — sentence-transformers bge-small-en-v1.5 (384-d).
-- **Storage:** SQLite + Chroma now → Postgres/pgvector Phase 4.
-- **UI:** Streamlit now → FastAPI + Next.js Phase 4.
+- **Storage:** SQLite+Chroma OR Postgres+pgvector — siblings behind one
+  surface, chosen by config. Setting MEMASSIST_POSTGRES_DSN is enough.
+  `assembly.build_stores()` is the ONLY place that knows which is running.
+- **UI:** Next.js + Tailwind on FastAPI (SSE). Streamlit is gone — removed
+  after web/PARITY.md was fully checked.
 - **CI/CD:** GitHub Actions from Phase 2 (ruff, pytest, gitleaks, pip-audit);
   CD to free hosting in Phase 5.
 
@@ -71,8 +74,11 @@ summarized messages from FIFO (Phase 1.5 fix).
 - Small commits; one phase = one branch; CI green before merge.
 
 ## Commands
-- `make dev` (Streamlit) · `make test` (pytest, 120) · `make bench` (110 pts)
-  · `make mcp` (FastMCP memory server, stdio) · `docker compose up` (Phase 4)
+- `make up` (docker compose: web+api+memory-mcp+postgres) · `make api` ·
+  `make web` · `make test` (pytest) · `make bench` (110 pts) · `make mcp` /
+  `make mcp-http` (memory server, stdio / Streamable HTTP)
+- Dual-backend runs: `MEMASSIST_TEST_POSTGRES_DSN=… pytest` and
+  `MEMASSIST_BENCH_POSTGRES_DSN=… python -m bench`
 - Lint/audit as CI runs them: `ruff check .` · `pip-audit -r requirements.txt
   --ignore-vuln PYSEC-2026-311` (chromadb: server-only RCE, no fix released,
   we run it embedded)
@@ -109,5 +115,18 @@ summarized messages from FIFO (Phase 1.5 fix).
         interrupt with Streamlit approve/deny
   - [x] T11 corpus in `security/injections/*.yaml`, read by BOTH the bench
         tier and CI (`tests/test_injections.py`)
-- [ ] Phase 4: Postgres/pgvector, FastAPI, Next.js, Docker
+- [x] Phase 4: production stack (bench 110/110 on BOTH backends)
+  - [x] Tool-schema economy: per-server `tools:` allowlist in the registry;
+        16 external schemas -> 6 (filesystem 14 -> 4)
+  - [x] Postgres+pgvector siblings behind the same surface + idempotent
+        migration; the budget ledger speaks both (an ephemeral SQLite file
+        in a container would re-spend an exhausted free tier every restart)
+  - [x] FastAPI: SSE turns, session id == checkpointer thread id,
+        approve/deny endpoints that resume the graph
+  - [x] Next.js + Tailwind; Streamlit removed after web/PARITY.md checked
+  - [x] MCP memory server also serves Streamable HTTP (`--http`)
+  - [x] docker-compose with healthchecks and bge-small baked into an image
+        LAYER (no ~130 MB download on container start)
+  - [x] CI: dual-backend python matrix + node lint/typecheck/build; the
+        benchmark is now a hard CI gate
 - [ ] Phase 5: CD deploy, Mistral consolidation lane (T10), Langfuse

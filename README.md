@@ -13,9 +13,10 @@ You:  "I'm Shravan, I work on ML infra and I hate long emails."
       → it still knows. That's the whole thesis.
 ```
 
-**Current status: Phase 1 complete and in real use.** Phases 2–4 are specified
-and scaffolded but not built — see [Build phases](#build-phases) for exactly
-what exists and what doesn't.
+**Current status: Phases 1–4 complete.** LangGraph orchestration, external MCP
+tools behind a real security layer, Postgres/pgvector alongside SQLite/Chroma,
+a FastAPI service with SSE, and a Next.js UI — `docker compose up --build`.
+Benchmark: **110/110 on both storage backends**.
 
 ---
 
@@ -562,7 +563,6 @@ and does not depend on Hugging Face being reachable.
 ```bash
 make api        # FastAPI on :8000  (uvicorn api.main:app --reload)
 make web        # Next.js on :3000  (needs `cd web && npm install` once)
-make dev        # Streamlit on :8501 — the Phase 1 UI
 make mcp        # MCP memory server on stdio
 make mcp-http   # …or Streamable HTTP on :8090
 
