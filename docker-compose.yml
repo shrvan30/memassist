@@ -1,0 +1,106 @@
+# Full stack: web -> api -> memory-mcp -> postgres (spec §11 P4).
+#
+#   cp .env.example .env     # paste at least one provider key
+#   docker compose up --build
+#   open http://localhost:3000
+#
+# Every service waits on its dependency being HEALTHY, not merely started, so a
+# fresh `up` cannot race Postgres accepting connections.
+
+name: memassist
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memassist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memassist}
+      POSTGRES_DB: ${POSTGRES_DB:-memassist}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      # -d as well as -U: pg_isready reports ready while the *initdb* pass is
+      # still running, and the app would then connect to a database that does
+      # not exist yet.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-memassist} -d ${POSTGRES_DB:-memassist}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  memory-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "memory_server", "--http", "--host", "0.0.0.0", "--port", "8090"]
+    environment:
+      MEMASSIST_POSTGRES_DSN: postgresql://${POSTGRES_USER:-memassist}:${POSTGRES_PASSWORD:-memassist}@postgres:5432/${POSTGRES_DB:-memassist}
+      MEMASSIST_STORAGE_BACKEND: postgres
+      HF_HOME: /opt/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MEMASSIST_POSTGRES_DSN: postgresql://${POSTGRES_USER:-memassist}:${POSTGRES_PASSWORD:-memassist}@postgres:5432/${POSTGRES_DB:-memassist}
+      MEMASSIST_STORAGE_BACKEND: postgres
+      MEMASSIST_CORS_ORIGINS: ${MEMASSIST_CORS_ORIGINS:-http://localhost:3000}
+      MEMASSIST_MCP_URL: http://memory-mcp:8090/mcp
+      HF_HOME: /opt/models
+      # Provider keys come from .env — never baked into an image (spec §6.3).
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      # External MCP servers need uvx/npx, which this image does not carry.
+      # Set to 1 once you add them, or point the registry at HTTP services.
+      MEMASSIST_EXTERNAL_TOOLS: ${MEMASSIST_EXTERNAL_TOOLS:-0}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # The filesystem server's jail, if external tools are enabled.
+      - ./workspace:/app/workspace
+    depends_on:
+      postgres:
+        condition: service_healthy
+      memory-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        # The browser calls the API directly, so this is the address as seen
+        # from the BROWSER, not from inside the compose network.
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -4,8 +4,27 @@ on:
   pull_request:
 
 jobs:
-  checks:
+  python:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The storage layer has two implementations behind one surface; they
+        # only stay equivalent if both are exercised. `sqlite` is the zero-setup
+        # default, `postgres` boots a real pgvector service.
+        backend: [sqlite, postgres]
+    services:
+      postgres:
+        image: ${{ matrix.backend == 'postgres' && 'pgvector/pgvector:pg16' || '' }}
+        env:
+          POSTGRES_USER: memassist
+          POSTGRES_PASSWORD: memassist
+          POSTGRES_DB: memassist
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U memassist -d memassist"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }   # gitleaks needs history
@@ -16,23 +35,69 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Lint
+        if: matrix.backend == 'sqlite'
         run: ruff check .
 
       - name: Unit + security tests (no LLM keys)
+        env:
+          # Set only on the postgres leg; unset, the dual-backend suite skips
+          # its Postgres half rather than silently passing it.
+          MEMASSIST_TEST_POSTGRES_DSN: ${{ matrix.backend == 'postgres' && 'postgresql://memassist:memassist@localhost:5432/memassist' || '' }}
         run: pytest tests/ -m "not llm" -q
 
+      - name: Benchmark (regression gate, must stay 110/110)
+        env:
+          MEMASSIST_BENCH_POSTGRES_DSN: ${{ matrix.backend == 'postgres' && 'postgresql://memassist:memassist@localhost:5432/memassist' || '' }}
+        run: |
+          python -m bench --json bench.json
+          python - <<'PY'
+          import json, sys
+          r = json.load(open("bench.json"))
+          print(f"bench: {r['total']}/{r['possible']}")
+          sys.exit(0 if r["total"] == r["possible"] else 1)
+          PY
+
       - name: Secret scan
+        if: matrix.backend == 'sqlite'
         uses: gitleaks/gitleaks-action@v2
-        # Quoted: in a YAML flow mapping the `{` of `${{ }}` is a flow indicator,
-        # so bare it is a parse error and the whole workflow fails at startup.
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
 
       - name: Dependency audit
+        if: matrix.backend == 'sqlite'
         # PYSEC-2026-311: chromadb RCE via trust_remote_code on the /api/v2 HTTP
         # endpoint. No fixed release exists, and MemAssist runs Chroma embedded
         # (PersistentClient) with no server, so the endpoint does not exist here.
         # Drop the ignore once chromadb ships a fix.
         run: pip-audit -r requirements.txt --ignore-vuln PYSEC-2026-311
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: web }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Dependency audit
+        # Runtime deps only: dev tooling is not shipped, and a dev-only advisory
+        # should not be able to block a release.
+        run: npm audit --omit=dev --audit-level=high
 
   # Nightly smoke benchmark (real free-tier keys via repo secrets).
   # Manual trigger only until quota impact is measured.
