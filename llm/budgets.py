@@ -33,7 +33,19 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_PG_SCHEMA = _SCHEMA.replace("DATE NOT NULL", "DATE NOT NULL").replace(
+    "TIMESTAMP", "TIMESTAMPTZ"
+)
+
+
 class BudgetLedger:
+    """Per-provider daily usage. Backed by SQLite or Postgres.
+
+    Postgres matters more than it looks: in a container the SQLite file is
+    ephemeral, so every restart would hand the router a fresh, empty budget and
+    it would cheerfully re-spend a free tier it had already exhausted.
+    """
+
     def __init__(
         self,
         db_path: str = ":memory:",
@@ -41,6 +53,14 @@ class BudgetLedger:
     ) -> None:
         self._now = now_fn
         self._lock = threading.Lock()
+        self._pg = db_path.startswith("postgresql://") or db_path.startswith("postgres://")
+        if self._pg:
+            from memory_server.storage.postgres import connect
+
+            self._conn = connect(db_path)
+            with self._lock:
+                self._conn.execute(_PG_SCHEMA)
+            return
         if db_path != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
@@ -48,6 +68,22 @@ class BudgetLedger:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+
+    # -- dialect ------------------------------------------------------------
+    def _sql(self, statement: str) -> str:
+        """SQLite is the source of truth; Postgres gets the two rewrites it needs."""
+        if not self._pg:
+            return statement
+        return statement.replace("?", "%s").replace("INSERT OR IGNORE", "INSERT")
+
+    def _exec(self, statement: str, params: tuple = ()):
+        sql = self._sql(statement)
+        if self._pg and "INSERT INTO provider_usage" in sql:
+            sql += " ON CONFLICT (provider, usage_date) DO NOTHING"
+        cur = self._conn.execute(sql, params)
+        if not self._pg:
+            self._conn.commit()
+        return cur
 
     # -- helpers -----------------------------------------------------------
     def _now_utc(self) -> datetime:
@@ -57,7 +93,7 @@ class BudgetLedger:
         return self._now_utc().date().isoformat()
 
     def _ensure_row(self, provider: str) -> None:
-        self._conn.execute(
+        self._exec(
             "INSERT OR IGNORE INTO provider_usage (provider, usage_date) VALUES (?, ?)",
             (provider, self._today()),
         )
@@ -66,22 +102,20 @@ class BudgetLedger:
     def record_request(self, provider: str, tokens: int = 0) -> None:
         with self._lock:
             self._ensure_row(provider)
-            self._conn.execute(
+            self._exec(
                 "UPDATE provider_usage SET requests = requests + 1, tokens = tokens + ? "
                 "WHERE provider = ? AND usage_date = ?",
                 (int(tokens), provider, self._today()),
             )
-            self._conn.commit()
 
     def set_cooldown(self, provider: str, until: datetime) -> None:
         with self._lock:
             self._ensure_row(provider)
-            self._conn.execute(
+            self._exec(
                 "UPDATE provider_usage SET cooldown_until = ? "
                 "WHERE provider = ? AND usage_date = ?",
                 (until.astimezone(timezone.utc).isoformat(), provider, self._today()),
             )
-            self._conn.commit()
 
     def cooldown_for_seconds(self, provider: str, seconds: float) -> None:
         self.set_cooldown(provider, self._now_utc() + timedelta(seconds=seconds))
@@ -95,20 +129,22 @@ class BudgetLedger:
 
     # -- reads -------------------------------------------------------------
     def get_usage(self, provider: str) -> tuple[int, int]:
-        row = self._conn.execute(
+        row = self._exec(
             "SELECT requests, tokens FROM provider_usage WHERE provider = ? AND usage_date = ?",
             (provider, self._today()),
         ).fetchone()
         return (int(row["requests"]), int(row["tokens"])) if row else (0, 0)
 
     def cooldown_remaining(self, provider: str) -> float:
-        row = self._conn.execute(
+        row = self._exec(
             "SELECT cooldown_until FROM provider_usage WHERE provider = ? AND usage_date = ?",
             (provider, self._today()),
         ).fetchone()
         if not row or not row["cooldown_until"]:
             return 0.0
-        until = datetime.fromisoformat(row["cooldown_until"])
+        stored = row["cooldown_until"]
+        # Postgres hands back a datetime; SQLite an ISO string.
+        until = stored if isinstance(stored, datetime) else datetime.fromisoformat(stored)
         return max(0.0, (until - self._now_utc()).total_seconds())
 
     def is_cooling(self, provider: str) -> bool:
@@ -116,7 +152,7 @@ class BudgetLedger:
 
     def snapshot(self) -> dict[str, dict[str, float]]:
         """Today's usage per provider — handy for the UI/debug panel."""
-        rows = self._conn.execute(
+        rows = self._exec(
             "SELECT provider, requests, tokens FROM provider_usage WHERE usage_date = ?",
             (self._today(),),
         ).fetchall()

@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -189,16 +191,66 @@ def tc(name, arguments, cid="call_1"):
     return ToolCall(id=cid, name=name, arguments=arguments)
 
 
+# Set to a DSN to run the whole suite against Postgres+pgvector instead of
+# SQLite+Chroma. The score must be identical either way — that is the point.
+BENCH_PG_DSN = os.getenv("MEMASSIST_BENCH_POSTGRES_DSN")
+
+
 def make_memory(tmp: Path, with_archival: bool = True) -> MemoryTools:
     tmp.mkdir(parents=True, exist_ok=True)
-    store = SQLiteStore(
+    if BENCH_PG_DSN:
+        from memory_server.storage.pgvector_store import PgVectorStore
+        from memory_server.storage.postgres import PostgresStore, connect
+
+        # One throwaway schema per check, mirroring the fresh temp dir the
+        # SQLite path gets — checks must not see each other's rows.
+        schema = f"bench_{uuid.uuid4().hex[:12]}"
+        admin = connect(BENCH_PG_DSN)
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+        admin.close()
+        dsn = f"{BENCH_PG_DSN}?options=-csearch_path%3D{schema},public"
+        store = PostgresStore(
+            dsn,
+            default_persona=config.DEFAULT_PERSONA,
+            default_human=config.DEFAULT_HUMAN,
+            core_block_char_limit=2000,
+        )
+        archival = PgVectorStore(dsn) if with_archival else None
+        store._bench_dsn = dsn
+    else:
+        store = SQLiteStore(
+            str(tmp / "mem.db"),
+            default_persona=config.DEFAULT_PERSONA,
+            default_human=config.DEFAULT_HUMAN,
+            core_block_char_limit=2000,
+        )
+        archival = ArchivalStore(str(tmp / "chroma")) if with_archival else None
+    return MemoryTools(store, archival, session_id="bench", page_size=3, archival_top_k=5)
+
+
+def reopen_store(tmp: Path, mem: MemoryTools):
+    """Reopen the SAME storage a MemoryTools was built on.
+
+    T2c asserts core memory survives a restart, so it has to reopen the store
+    the data actually went into — hardcoding SQLite here made the check silently
+    pass an empty database when the suite ran on Postgres.
+    """
+    dsn = getattr(mem.store, "_bench_dsn", None)
+    if dsn:
+        from memory_server.storage.postgres import PostgresStore
+
+        return PostgresStore(
+            dsn,
+            default_persona=config.DEFAULT_PERSONA,
+            default_human=config.DEFAULT_HUMAN,
+            core_block_char_limit=2000,
+        )
+    return SQLiteStore(
         str(tmp / "mem.db"),
         default_persona=config.DEFAULT_PERSONA,
         default_human=config.DEFAULT_HUMAN,
         core_block_char_limit=2000,
     )
-    archival = ArchivalStore(str(tmp / "chroma")) if with_archival else None
-    return MemoryTools(store, archival, session_id="bench", page_size=3, archival_top_k=5)
 
 
 def make_loop(mem, router, **kw):
@@ -306,12 +358,7 @@ def t2c_persists_across_restart(tmp):
     mem = make_memory(tmp)
     mem.core_memory_append("human", "Name: Bob.")
     mem.store.close()
-    reopened = SQLiteStore(
-        str(tmp / "mem.db"),
-        default_persona=config.DEFAULT_PERSONA,
-        default_human=config.DEFAULT_HUMAN,
-        core_block_char_limit=2000,
-    )
+    reopened = reopen_store(tmp, mem)
     blocks = reopened.get_core_blocks()
     reopened.close()
     return "Bob" in blocks.get("human", ""), blocks.get("human", "")[:60]
@@ -782,7 +829,8 @@ def run(live: bool = False, json_out: str | None = None) -> int:
     total = sum(r["earned"] for r in results)
     possible = sum(r["points"] for r in results)
 
-    print("\nMemAssist benchmark — deterministic suite\n" + "=" * 62)
+    backend = "postgres+pgvector" if BENCH_PG_DSN else "sqlite+chroma"
+    print(f"\nMemAssist benchmark [{backend}]\n" + "=" * 62)
     for tier in sorted(TIER_NAMES, key=lambda k: int(k[1:])):
         rows = [r for r in results if r["tier"] == tier]
         if not rows:
