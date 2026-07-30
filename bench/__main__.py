@@ -5,14 +5,6 @@ fakes instead of live providers, so a score delta between two runs is
 attributable to a source change and nothing else. ``--live`` additionally runs
 a real-provider smoke test; it is reported separately and does NOT affect the
 score, so the number stays reproducible in CI.
-
-Tiers map one-to-one onto the Phase 1.5 fix sprint, so each fix moves exactly
-one tier:
-  T1 router/provider health   -> fix 1 (Gemini 0-req)
-  T4c FIFO eviction           -> fix 2
-  T5 semantic retrieval       -> fix 3 (bge-small)
-  T7c friendly exhaustion     -> fix 4
-  T8 provenance               -> fix 5
 """
 
 from __future__ import annotations
@@ -67,7 +59,7 @@ class FakeHTTPError(Exception):
         super().__init__(message)
 
 
-# Verbatim shape of the real Gemini free-tier refusal (see BENCHMARKS.md notes).
+# Verbatim shape of the real Gemini free-tier refusal.
 ZERO_QUOTA_BODY = (
     "You exceeded your current quota, please check your plan and billing details. "
     "* Quota exceeded for metric: generativelanguage.googleapis.com/"
@@ -210,7 +202,7 @@ def make_loop(mem, router, **kw):
 
 
 # =========================================================================
-# T1 — Router & provider health (12)  [fix 1]
+# T1 — Router & provider health (12)
 # =========================================================================
 @check("T1a", 4)
 def t1a_transient_429_fails_over(tmp):
@@ -243,10 +235,9 @@ def t1b_auth_error_skips_without_cooldown(tmp):
 def t1c_permanent_quota_is_not_a_transient_429(tmp):
     """`limit: 0` means the model has NO free-tier allowance — permanent.
 
-    Classifying it as a plain RateLimitError is the Gemini 0-req bug: the
-    provider is cooled down for 60s forever and silently never serves. A 404
-    (model retired/unavailable) is likewise permanent. Both must be
-    distinguishable from a transient 429.
+    Classifying it as a plain RateLimitError would cool the provider down for
+    60s forever so it silently never serves. A 404 (model retired/unavailable)
+    is likewise permanent. Both must be distinguishable from a transient 429.
     """
     zero = FakeHTTPError(429, ZERO_QUOTA_BODY)
     transient = FakeHTTPError(429, TRANSIENT_429_BODY)
@@ -340,7 +331,7 @@ def t3c_pagination(tmp):
 
 
 # =========================================================================
-# T4 — Archival + context pressure (18)   [T4c = fix 2]
+# T4 — Archival + context pressure (18)
 # =========================================================================
 @check("T4a", 5)
 def t4a_archival_insert_and_search(tmp):
@@ -366,12 +357,12 @@ def t4b_pressure_warning_injected(tmp):
 
 @check("T4c", 8)
 def t4c_fifo_eviction_after_offload(tmp):
-    """The MemGPT mechanic: offloading to archival must FREE context.
+    """Offloading to archival must FREE context.
 
     Under pressure the agent summarizes into archival — and the loop must then
     EVICT those summarized messages from the in-context FIFO and recompute
     usage. Without eviction the queue only ever grows and the warning fires
-    forever (the Phase 1 gap).
+    forever.
     """
     mem = make_memory(tmp)
     router = FakeRouter(
@@ -394,7 +385,7 @@ def t4c_fifo_eviction_after_offload(tmp):
         ]
     )
     loop = make_loop(mem, router, planning_context_limit=2800)
-    # 20 stale turns already in context, and we are over the threshold.
+    # 20 stale turns already in context, over the threshold.
     filler = "recap of an earlier exchange, " * 10
     for i in range(10):
         loop.messages.append({"role": "user", "content": f"old user message {i}: {filler}"})
@@ -416,7 +407,7 @@ def t4c_fifo_eviction_after_offload(tmp):
 
 
 # =========================================================================
-# T5 — Semantic retrieval quality (16)   [fix 3: bge-small]
+# T5 — Semantic retrieval quality (16)
 # =========================================================================
 T5_CORPUS = [
     "The user's daughter Mira was born in Pune in 2019.",
@@ -495,7 +486,7 @@ def t6c_heartbeat_cap(tmp):
 
 
 # =========================================================================
-# T7 — Resilience & degradation (10)   [T7c = fix 4]
+# T7 — Resilience & degradation (10)
 # =========================================================================
 @check("T7a", 3)
 def t7a_archival_unavailable(tmp):
@@ -532,7 +523,7 @@ def t7c_friendly_exhaustion_message(tmp):
 
 
 # =========================================================================
-# T8 — Provenance (10)   [fix 5]
+# T8 — Provenance (10)
 # =========================================================================
 @check("T8a", 5)
 def t8a_archival_metadata_source(tmp):
@@ -554,7 +545,7 @@ def t8a_archival_metadata_source(tmp):
 
 @check("T8b", 5)
 def t8b_human_block_lines_tagged(tmp):
-    """Human-block lines carry a provenance marker (spec §2/§8)."""
+    """Human-block lines carry a provenance marker."""
     mem = make_memory(tmp)
     try:
         mem.dispatch(

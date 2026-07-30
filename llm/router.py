@@ -1,10 +1,10 @@
-"""Priority-ordered free-tier failover router (PROJECT_SPEC.md §3.3).
+"""Priority-ordered free-tier failover router.
 
-Every LLM call in MemAssist goes through ``Router.chat``. The router walks a
-priority-ordered provider chain, proactively skips providers that are cooling
-down or over budget (per the persistent :class:`BudgetLedger`), fails over on
-429/402/5xx, records usage, and tags the result with ``served_by`` so the UI can
-show a provider badge.
+Every LLM call goes through ``Router.chat``. The router walks a priority-ordered
+provider chain, proactively skips providers that are cooling down or over budget
+(per the persistent :class:`BudgetLedger`), fails over on 429/402/5xx, records
+usage, and tags the result with ``served_by`` so the UI can show a provider
+badge.
 
 The provider transport is injected via ``client_factory``, so the whole failover
 algorithm is unit-tested with fake clients and never touches the network.
@@ -214,7 +214,7 @@ class Router:
         *,
         tool_choice: str = "auto",
     ) -> ChatResult:
-        """Background/batch lane — routes straight to Mistral (§3.2)."""
+        """Background/batch lane — routes straight to Mistral."""
         return self.chat(messages, tools, tool_choice=tool_choice, lane="background")
 
     def has_key(self, provider: str) -> bool:
@@ -227,7 +227,7 @@ class Router:
         return self.min_context_window()
 
     def min_context_window(self) -> int:
-        """Smallest window in the chain — the safe planning default (§3.4)."""
+        """Smallest window in the chain — the safe planning default."""
         return min((cfg.context_window for cfg in self.providers), default=32_768)
 
     def provider_status(self) -> list[dict[str, Any]]:

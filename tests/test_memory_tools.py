@@ -79,6 +79,6 @@ def test_conversation_search_date_valid_range(mem):
 
 def test_conversation_search_date_malformed_returns_error(mem):
     # Malformed dates must come back as a correctable "Error: ..." string, not a
-    # silent "no matches" (the T3b gap) and not an exception.
+    # silent "no matches" and not an exception.
     out = mem.conversation_search_date("not-a-date", "also-bad")
     assert out.startswith("Error:")

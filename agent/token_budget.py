@@ -11,8 +11,8 @@ from __future__ import annotations
 def approx_tokens(text: str) -> int:
     """Very rough character-based token estimate (~4 chars/token).
 
-    Used only for a pre-first-response sidebar preview. Real counts come from the
-    Anthropic response usage, or the count_tokens API (see the bridge).
+    Used only for a pre-first-response sidebar preview; real counts come from
+    the provider's response usage.
     """
     return max(1, len(text) // 4)
 

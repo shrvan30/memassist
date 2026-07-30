@@ -1,9 +1,8 @@
-"""Phase 2 entry point: the FastMCP memory server (stdio).
+"""Entry point for the FastMCP memory server (stdio).
 
-Not implemented in Phase 1 — this stub exists so ``python -m memory_server`` and
-the ``.mcp.json`` registration have a clear target. Phase 2 will expose the six
-memory tools from ``memory_tools.py`` over the Model Context Protocol, and the
-agent loop will become an MCP client.
+Not yet implemented — this stub exists so ``python -m memory_server`` and the
+``.mcp.json`` registration have a clear target. The memory tools are currently
+dispatched locally inside the agent loop.
 """
 
 from __future__ import annotations

@@ -1,1 +1,1 @@
-"""MemAssist benchmark harness (PROJECT_SPEC.md §11)."""
+"""MemAssist benchmark harness."""

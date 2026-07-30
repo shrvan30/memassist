@@ -1,28 +1,27 @@
-# Free-tier provider chain for the failover router (PROJECT_SPEC.md §3.1).
+# Free-tier provider chain for the failover router.
 #
-# NOTE: Free-tier limits change often — VERIFY base_url, model slugs, and budgets at
+# Free-tier limits change often — verify base_url, model slugs, and budgets at
 # signup. The budgets below are conservative planning defaults used for proactive
 # skipping; they are not authoritative. `api_key_env` names the env var holding
 # each provider's key (see .env.example).
 #
-# Providers are tried in `priority` order for the given `lane`. Phase 1 runs on
+# Providers are tried in `priority` order for the given `lane`. The router runs on
 # whichever keys are present (typically gemini + groq); missing-key providers are
 # skipped automatically.
 
 providers:
   - name: gemini
     priority: 1
-    # Use a Flash model that does STANDARD OpenAI tool-calling. Avoid Gemini 3.x
-    # (gemini-flash-latest / gemini-3-*) here: they require round-tripping a
+    # Use a Flash model that does standard OpenAI tool-calling. Avoid Gemini 3.x
+    # (gemini-flash-latest / gemini-3-*): they require round-tripping a
     # Google-specific `thought_signature` on every function call, which breaks
     # the flat cross-provider tool format (400 INVALID_ARGUMENT).
     #
-    # NOT gemini-2.0-flash / -2.0-flash-001: both return HTTP 429 with
-    # "limit: 0" on the current free tier — no allowance at all, so the router
-    # cooled them down forever and Gemini served 0 requests through all of
-    # Phase 1. Not gemini-2.5-flash either: 404 on this endpoint despite being
-    # listed by /models. Verified 2026-07-29: 2.5-flash-lite answers and emits
-    # standard flat tool_calls. Re-verify with `make bench LIVE=1`.
+    # Not gemini-2.0-flash / -2.0-flash-001: both return HTTP 429 with "limit: 0"
+    # on the current free tier — no allowance at all, so the router cools them
+    # down forever and Gemini serves nothing. Not gemini-2.5-flash either: 404 on
+    # this endpoint despite being listed by /models. 2.5-flash-lite answers and
+    # emits standard flat tool_calls.
     model: gemini-2.5-flash-lite
     base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     api_key_env: GEMINI_API_KEY
@@ -67,6 +66,6 @@ providers:
     daily_request_limit: null
     daily_token_limit: null
     rpm_limit: 2
-    # Interactive last-resort AND the dedicated background/batch lane (§3.2).
+    # Interactive last-resort and the dedicated background/batch lane.
     lanes: [interactive, background]
     role: Last resort + background

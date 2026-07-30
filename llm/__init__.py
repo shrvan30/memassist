@@ -1,9 +1,9 @@
-"""Free-tier failover LLM router (PROJECT_SPEC.md §3).
+"""Free-tier failover LLM router.
 
-All LLM traffic in MemAssist goes through this package — never call a provider
-directly from agent code. Providers are OpenAI-compatible (Gemini, Groq,
-OpenRouter, Mistral) and differ only in base_url / api_key / model, so a single
-``openai`` client shape works for all of them.
+All LLM traffic goes through this package — never call a provider directly from
+agent code. Providers are OpenAI-compatible (Gemini, Groq, OpenRouter, Mistral)
+and differ only in base_url / api_key / model, so a single ``openai`` client
+shape works for all of them.
 """
 
 from .errors import AllProvidersExhausted, ProviderConfigError, RouterError

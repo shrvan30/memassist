@@ -1,5 +1,5 @@
-"""Agent loop package: prompts, token budgeting, Anthropic bridge, and the loop.
+"""Agent loop package: prompts, token budgeting, and the loop.
 
-Storage details deliberately live behind the memory interface (Phase 2 moves
-them behind an MCP server); nothing in this package imports storage directly.
+Storage lives behind the memory interface; nothing in this package imports
+storage directly.
 """

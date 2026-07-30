@@ -1,4 +1,4 @@
-"""Persistent per-provider usage ledger (the ``provider_usage`` table, spec §6).
+"""Persistent per-provider usage ledger (the ``provider_usage`` table).
 
 Tracks daily request/token counts and cooldowns so the router can *proactively*
 skip exhausted or cooling providers instead of burning a request to discover a

@@ -1,12 +1,11 @@
 """Pydantic models + OpenAI function-calling tool definitions for the memory tools.
 
 Each tool has a Pydantic model (used to validate the model-supplied arguments at
-dispatch time) and a hand-written JSON parameter schema (what the LLM sees). They
-are colocated here so the pair stays in sync. Tool signatures follow
-PROJECT_SPEC.md §2, and parameter schemas are kept FLAT (no nested objects) for
-reliable tool-calling across all four providers (§2, §3.4).
+dispatch time) and a hand-written JSON parameter schema (what the LLM sees),
+colocated here so the pair stays in sync. Parameter schemas are kept flat (no
+nested objects) for reliable tool-calling across all four providers.
 
-Every *memory* tool carries a ``request_heartbeat`` flag so the agent can chain
+Every memory tool carries a ``request_heartbeat`` flag so the agent can chain
 another action before replying. ``send_message`` is the terminal reply and has
 no heartbeat.
 """
@@ -23,10 +22,9 @@ _HEARTBEAT_DESC = (
     "are done working and about to send your message."
 )
 
-# Provenance (PROJECT_SPEC.md §2/§8). Defaults to 'inferred' everywhere: a fact
-# is only ever labelled 'stated' by an explicit claim, so a mislabelled write is
-# an under-claim rather than words put in the user's mouth. Phase 3 adds
-# 'external' for content arriving from untrusted MCP tools (§6.3).
+# Provenance defaults to 'inferred' everywhere: a fact is only ever labelled
+# 'stated' by an explicit claim, so a mislabelled write is an under-claim rather
+# than words put in the user's mouth.
 _SOURCE_DESC = (
     "Provenance of this fact. Use 'stated' ONLY when the user said it explicitly in "
     "conversation. Use 'inferred' when you worked it out yourself. When unsure, use "

@@ -1,8 +1,8 @@
 """The MemGPT-style agent loop, driven by the free-tier failover router.
 
-Responsibilities (PROJECT_SPEC.md §4):
+Responsibilities:
 1. Build the system prompt each turn from base instructions + rendered core
-   memory + memory stats (counts + % of the ACTIVE provider's context window).
+   memory + memory stats (counts + % of the active provider's context window).
 2. Maintain the FIFO message queue (OpenAI chat format) and call
    ``router.chat(messages, tools)``.
 3. Dispatch tool calls, append tool results, honor ``request_heartbeat`` (cap 5).
@@ -11,7 +11,7 @@ Responsibilities (PROJECT_SPEC.md §4):
 5. Persist every event to recall memory, tagged with the serving provider.
 
 The loop talks to memory only through ``MemoryInterface`` and to the LLM only
-through ``LLMRouter`` — no storage or provider details leak in here.
+through ``LLMRouter``.
 """
 
 from __future__ import annotations
@@ -20,8 +20,7 @@ import json
 import logging
 from typing import Any, Protocol, Sequence, runtime_checkable
 
-# The router's exhaustion error is part of the LLMRouter contract below, so the
-# loop imports the exception type and nothing else — no provider details leak in.
+# Part of the LLMRouter contract below; the exception type is the only import.
 from llm.errors import AllProvidersExhausted
 
 from .prompts import eviction_notice, memory_pressure_warning, render_system_prompt
@@ -226,8 +225,7 @@ class AgentLoop:
 
         Without this the queue only ever grows: the agent summarizes into
         archival, frees nothing, and the pressure warning fires on every
-        subsequent turn (the Phase 1 gap). Returns the number of messages
-        evicted.
+        subsequent turn. Returns the number of messages evicted.
         """
         total = len(self.messages)
         if total < MIN_MESSAGES_BEFORE_EVICTION:

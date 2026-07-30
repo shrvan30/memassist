@@ -1,8 +1,8 @@
-"""Central configuration for MemAssist (Phase 1).
+"""Central configuration for MemAssist.
 
 All values can be overridden via environment variables (see ``.env.example``).
-Kept dependency-light so every module — storage, router, agent, and the
-Streamlit app — can import it without pulling in heavy packages.
+Kept dependency-light so every module can import it without pulling in heavy
+packages.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent
 
 # --- LLM router (free-tier failover; see llm/router.py) ------------------
 # A fixed temperature across every provider keeps the assistant's voice stable
-# when the serving model changes mid-conversation (PROJECT_SPEC.md §3.4).
+# when the serving model changes mid-conversation.
 TEMPERATURE: float = float(os.getenv("MEMASSIST_TEMPERATURE", "0.3"))
 PROVIDERS_YAML: str = os.getenv(
     "MEMASSIST_PROVIDERS_YAML", str(ROOT / "llm" / "providers.yaml")
@@ -35,9 +35,8 @@ MISTRAL_API_KEY: str | None = os.getenv("MISTRAL_API_KEY")
 
 # --- Context / memory-pressure policy ------------------------------------
 # Pressure is measured against the ACTIVE provider's context window, capped by
-# this planning limit (the smallest window in the chain is the safe default,
-# §3.4). Keeping it modest also makes the MemGPT eviction mechanic observable in
-# a short chat. Set to 0 to disable the cap and use the real provider window.
+# this planning limit (the smallest window in the chain is the safe default).
+# Set to 0 to disable the cap and use the real provider window.
 CONTEXT_LIMIT: int = int(os.getenv("MEMASSIST_CONTEXT_LIMIT", "32000"))
 PRESSURE_THRESHOLD: float = float(os.getenv("MEMASSIST_PRESSURE_THRESHOLD", "0.7"))
 

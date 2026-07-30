@@ -1,7 +1,7 @@
 """Router exceptions + classification of provider-call failures.
 
 The classifier maps SDK/transport exceptions to router-level categories that
-drive the failover algorithm (PROJECT_SPEC.md §3.3):
+drive the failover algorithm:
 
 - 429  -> RateLimitError       (short cooldown, then next provider)
 - 402  -> QuotaExceededError   (cooldown until UTC midnight, then next provider)
@@ -11,12 +11,12 @@ drive the failover algorithm (PROJECT_SPEC.md §3.3):
 - other (e.g. 400) -> propagated unchanged, so request bugs surface instead of
   being silently masked by a failover to every provider.
 
-Why zero-quota 429s are permanent (the Phase 1 "Gemini 0-req" bug): Google
-returns HTTP 429 both for "you are going too fast" and for "this model has no
-free-tier allowance on your project" (``limit: 0``). Treating the second as a
-transient rate limit puts the provider on a rolling 60s cooldown forever, so it
-serves zero requests and never once reports why. The two must be distinguished
-here, at classification time.
+Why zero-quota 429s are permanent: some providers (e.g. Google) return HTTP 429
+both for "you are going too fast" and for "this model has no free-tier allowance
+on your project" (``limit: 0``). Treating the second as a transient rate limit
+puts the provider on a rolling 60s cooldown forever, so it serves zero requests
+and never once reports why. The two must be distinguished here, at classification
+time.
 """
 
 from __future__ import annotations
@@ -66,8 +66,7 @@ class ProviderPermanentError(ProviderError):
     """The provider cannot serve until a human changes configuration.
 
     Deliberately NOT cooled down. A cooldown implies "try again later", which is
-    false here and hides the real fault behind a retry timer — exactly how the
-    Gemini zero-quota misconfiguration stayed invisible through Phase 1.
+    false here and hides the real fault behind a retry timer.
     """
 
 

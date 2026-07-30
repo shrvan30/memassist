@@ -1,16 +1,12 @@
 """Archival memory: a Chroma vector store with semantic search.
 
-Embeddings come from the local bge-small-en-v1.5 model (see ``embedder.py``).
-Phase 1's ``hashing_embedding`` is kept below — it is a purely lexical bag of
-tokens, so it cannot match a paraphrase against its own passage, but it stays
-available as a zero-dependency fallback for offline unit tests.
+Embeddings come from the local bge-small-en-v1.5 model (see ``embedder.py``); the
+lexical ``hashing_embedding`` below stays available as a zero-dependency fallback
+for offline unit tests. Embeddings are computed here and passed to Chroma
+explicitly (``embedding_function=None``) to avoid Chroma's default embedder, which
+would download an ONNX model.
 
-Embeddings are computed here and passed to Chroma explicitly (the collection is
-created with ``embedding_function=None``), which avoids Chroma's default embedder
-(which would download an ONNX model) and its version-specific EF-serialization
-machinery.
-
-NOTE: a collection's vector dimensionality is fixed at creation. Changing
+A collection's vector dimensionality is fixed at creation, so changing
 ``embed_fn`` to a model with a different width requires re-embedding an existing
 store — see ``migrate_embeddings.py``.
 """

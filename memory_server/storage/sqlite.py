@@ -1,7 +1,7 @@
 """SQLite storage for core memory (editable blocks) and recall memory (messages).
 
-Schema matches PROJECT_SPEC.md §5. These functions are deterministic and contain
-no LLM calls, so they are unit-tested directly (see tests/).
+These functions are deterministic and contain no LLM calls, so they are
+unit-tested directly.
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ def _normalize_date_bound(value: str, *, is_end: bool) -> str:
     Accepts ``YYYY-MM-DD`` (expanded to the start or end of that day) or a full
     ``YYYY-MM-DD HH:MM:SS`` timestamp, returning a normalized
     ``YYYY-MM-DD HH:MM:SS`` string. Raises ``ValueError`` on anything else so the
-    caller — and the model driving conversation_search_date — gets a clear signal
-    to correct the input instead of a silent empty result.
+    caller gets a clear signal to correct the input instead of a silent empty
+    result.
     """
     text = (value or "").strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):

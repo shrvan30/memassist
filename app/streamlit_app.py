@@ -1,10 +1,9 @@
-"""Streamlit chat UI for MemAssist (Phase 1 MVP).
+"""Streamlit chat UI for MemAssist.
 
 The sidebar shows live core memory, context usage vs. the active provider's
 window, memory counts, and the free-tier provider chain (which provider is
 available / cooling down). Each reply is badged with the provider that served
-it. Definition of done: restart the app and the agent still knows your name;
-remove GEMINI_API_KEY and replies seamlessly arrive from Groq.
+it.
 
 Run with:  streamlit run app/streamlit_app.py   (or:  make dev)
 """

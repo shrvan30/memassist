@@ -1,11 +1,9 @@
 """Deterministic memory tools over SQLite (core + recall) and Chroma (archival).
 
-Each of the six memory tools returns a plain string, per PROJECT_SPEC.md §2. No
-LLM calls happen here — these are pure storage operations, unit-tested directly.
-
-The class also exposes helpers the agent loop needs without importing storage:
-rendering core memory, memory stats, recording recall events, and dispatching a
-validated tool call. This is the seam that Phase 2 replaces with an MCP client.
+Each of the six memory tools returns a plain string. No LLM calls happen here —
+these are pure storage operations, unit-tested directly. The class also exposes
+helpers the agent loop needs without importing storage: rendering core memory,
+memory stats, recording recall events, and dispatching a validated tool call.
 """
 
 from __future__ import annotations
@@ -56,7 +54,7 @@ class MemoryTools:
         # `source` argument is the only authority, so strip any tag they typed.
         content = _PROVENANCE_TAG_RE.sub("", content)
         # Only the human block carries provenance: 'persona' is the agent's own
-        # identity, where "did the user say this?" has no meaning (spec §2).
+        # identity, where "did the user say this?" has no meaning.
         line = f"{content} [{source}]" if block == "human" else content
         try:
             new_content = self.store.append_block(block, line)

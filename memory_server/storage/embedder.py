@@ -1,12 +1,8 @@
 """Local embedding model for archival memory — bge-small-en-v1.5, 384-d.
 
-LOCAL ONLY by design (CLAUDE.md tech stack): embeddings never leave the machine
-and cost nothing, which is what keeps the $0/month budget intact while archival
-memory grows. Replaces the Phase 1 hashing stub, which was purely lexical and
-so could not match a paraphrase against its own passage.
-
-The model is loaded lazily and cached for the process — the first call pays the
-load (and, once ever, the ~130 MB download), every later call is cheap.
+Local-only: embeddings never leave the machine and cost nothing. The model is
+loaded lazily and cached for the process — the first call pays the load (and,
+once ever, the ~130 MB download), every later call is cheap.
 """
 
 from __future__ import annotations
@@ -33,7 +29,7 @@ def embed(text: str) -> list[float]:
     """Embed one string into a 384-d L2-normalized vector.
 
     Normalizing at encode time means Chroma's cosine space and a plain dot
-    product agree, so distances stay comparable with the Phase 1 store.
+    product agree.
     """
     vector = get_model().encode(text, normalize_embeddings=True)
     return [float(x) for x in vector]
