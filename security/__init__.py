@@ -9,6 +9,13 @@ Two modules, two different jobs:
   driving it came from. This is the memory-poisoning defense (§6.3).
 """
 
+from .guards import CORE_MEMORY_TOOLS, GuardDecision, check_tool_call
 from .sanitizer import SanitizedResult, sanitize_external
 
-__all__ = ["SanitizedResult", "sanitize_external"]
+__all__ = [
+    "CORE_MEMORY_TOOLS",
+    "GuardDecision",
+    "SanitizedResult",
+    "check_tool_call",
+    "sanitize_external",
+]
