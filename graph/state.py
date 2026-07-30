@@ -104,6 +104,11 @@ class Deps:
     max_heartbeats: int
     external: ExternalToolset | None = None
     tool_result_char_cap: int = 4000
+    # Above this fraction of the limit the FIFO is paged out whether or not the
+    # model offloaded first. The warning at `pressure_threshold` asks nicely;
+    # this does not ask. Set high enough that a cooperative model always gets
+    # its chance to summarize before the forced cut.
+    hard_evict_fraction: float = 0.95
 
     def allowed_tools(self) -> frozenset[str]:
         """Per-node tool allowlist (spec §6.3). Deny-by-default lives on this.
