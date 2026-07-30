@@ -21,6 +21,7 @@ from typing import Sequence
 from uuid import uuid4
 
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from graph import build_graph, recursion_limit
 from graph.nodes import EVENT_MESSAGE
@@ -64,6 +65,7 @@ class AgentLoop:
         # process (Phase 4 already puts a database underneath).
         self._graph = build_graph(self._deps, checkpointer=InMemorySaver())
         self._recursion_limit = recursion_limit(max_heartbeats)
+        self._pending_approval: dict | None = None
         self._new_thread()
 
     # -- state: read -------------------------------------------------------
@@ -109,6 +111,7 @@ class AgentLoop:
         A fresh thread rather than a blanking update: it drops the accumulated
         checkpoints too, so a long session cannot grow without bound.
         """
+        self._pending_approval = None
         self._new_thread()
 
     def seed_context(
@@ -135,11 +138,16 @@ class AgentLoop:
 
     # -- the turn ----------------------------------------------------------
     def step(self, user_text: str) -> list[str]:
-        """Run one user turn. Returns the message(s) the agent sent to the user."""
+        """Run one user turn. Returns the message(s) the agent sent to the user.
+
+        If the agent asks for a gated action (a filesystem write), the turn
+        SUSPENDS: this returns whatever was delivered so far and
+        :attr:`pending_approval` becomes non-None. Call :meth:`resume` to finish.
+        """
         self.memory.record_event("user", EVENT_MESSAGE, user_text)
         state = self._snapshot()
 
-        final = self._graph.invoke(
+        return self._invoke(
             {
                 "messages": [
                     *state.get("messages", []),
@@ -154,7 +162,31 @@ class AgentLoop:
                 "final_reply": [],
                 "last_text": "",
                 "done": False,
-            },
-            self._config,
+                "saw_untrusted": False,
+                "untrusted_results": [],
+                "injection_flags": [],
+                "blocked_tools": [],
+                "tool_decisions": {},
+            }
         )
+
+    # -- human-in-the-loop -------------------------------------------------
+    @property
+    def pending_approval(self) -> dict | None:
+        """The gated action waiting on a human, or None (spec §4.3, §6.3)."""
+        return self._pending_approval
+
+    def resume(self, approved: bool) -> list[str]:
+        """Answer a pending approval and run the rest of the turn."""
+        if self._pending_approval is None:
+            return []
+        self._pending_approval = None
+        return self._invoke(Command(resume=bool(approved)))
+
+    def _invoke(self, payload) -> list[str]:
+        final = self._graph.invoke(payload, self._config)
+        # A turn that hit interrupt() comes back carrying the request instead of
+        # having finished. Everything already delivered this turn still stands.
+        pending = final.get("__interrupt__")
+        self._pending_approval = pending[0].value if pending else None
         return final.get("final_reply", [])

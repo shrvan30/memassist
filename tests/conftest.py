@@ -47,3 +47,44 @@ def mem(store, archival):
         archival_top_k=3,
         result_char_cap=120,
     )
+
+
+class FakeExternal:
+    """A stand-in external toolset implementing the full ExternalToolset protocol.
+
+    One shared fake rather than one per test module: the protocol is what the
+    security layer branches on, so a partial fake would let a test pass while
+    the real wiring is broken.
+    """
+
+    def __init__(self, tools=("search",), result="", trust="untrusted", gated=(), jail=None):
+        self._tools = frozenset(tools)
+        self._result = result
+        self._trust = trust
+        self._gated = frozenset(gated)
+        self._jail = jail
+        self.calls: list[tuple[str, dict]] = []
+
+    def names(self):
+        return self._tools
+
+    def trust_of(self, name):
+        return self._trust
+
+    def server_of(self, name):
+        return "fake-server"
+
+    def is_gated(self, name):
+        return name in self._gated
+
+    def jail_of(self, name):
+        return self._jail
+
+    def call(self, name, arguments):
+        self.calls.append((name, arguments))
+        return self._result
+
+
+@pytest.fixture
+def make_external():
+    return FakeExternal

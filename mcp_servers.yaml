@@ -32,5 +32,17 @@ servers:
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
     trust: untrusted
+    enabled: true
+    # The server enforces its own allowed-directory list; `jail` is the near
+    # side of the same rule, checked before the call leaves this process, so
+    # confinement does not rest on a third party staying correct.
+    jail: ./workspace
     write_gate: true          # every write requires human_interrupt approval
-    enabled: false            # step 4
+    # Listed explicitly rather than inferred: this server exports 14 tools and
+    # guessing which ones mutate the disk is the guess that ends with a file
+    # overwritten. Omit the list and write_gate gates ALL of them.
+    gated_tools:
+      - write_file
+      - edit_file
+      - create_directory
+      - move_file
