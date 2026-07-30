@@ -67,6 +67,19 @@ _INJECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
+        # A forged speaker tag — "[System note from the user]:", "SYSTEM:",
+        # "[INST]". Content claiming to be a privileged role is the cheapest
+        # way to launder an instruction into something that reads like the
+        # user's own words, so the TAG is what gets matched, not the ask.
+        # Anchored to line start so ordinary prose mentioning a role is safe.
+        "role-impersonation",
+        re.compile(
+            r"(?:^|\n)\s*\[?\s*(?:system|assistant|admin(?:istrator)?|inst)\b"
+            r"[^\]\n:]{0,24}[\]:]",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "imperative-to-assistant",
         re.compile(
             r"\b(?:you\s+must|you\s+should\s+now|do\s+not\s+tell|never\s+tell|"
