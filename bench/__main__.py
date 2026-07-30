@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
 from agent.loop import AgentLoop  # noqa: E402
+from agent.prompts import render_system_prompt  # noqa: E402
+from agent.token_budget import approx_tokens  # noqa: E402
 from llm import errors  # noqa: E402
 from llm.budgets import BudgetLedger  # noqa: E402
 from llm.router import ChatResult, ProviderConfig, Router, ToolCall, Usage  # noqa: E402
@@ -201,6 +203,18 @@ def make_loop(mem, router, **kw):
     return AgentLoop(router, mem, tools=[], **params)
 
 
+def _serialize_for_estimate(mem, what: str, messages=None) -> str:
+    """Reproduce what the loop actually measures, for calibrating T4c.
+
+    The loop estimates usage from ``json.dumps([system, *messages])``, so a
+    calibration that measured raw strings instead would drift from it.
+    """
+    if what == "system":
+        system = render_system_prompt(mem.render_core_memory(), mem.memory_stats(), "0 / 0 tokens (0%)")
+        return json.dumps([{"role": "system", "content": system}], default=str)
+    return json.dumps(list(messages or []), default=str)
+
+
 # =========================================================================
 # T1 — Router & provider health (12)
 # =========================================================================
@@ -364,6 +378,25 @@ def t4c_fifo_eviction_after_offload(tmp):
     forever.
     """
     mem = make_memory(tmp)
+
+    # 40 stale turns already in context.
+    filler = "recap of an earlier exchange, " * 10
+    preload: list[dict] = []
+    for i in range(20):
+        preload.append({"role": "user", "content": f"old user message {i}: {filler}"})
+        preload.append({"role": "assistant", "content": f"old reply {i}: {filler}"})
+
+    # Calibrate against the ACTUAL system prompt rather than a magic constant.
+    # The prompt is a floor eviction cannot touch, so it has to be measured: a
+    # hardcoded budget silently stops testing anything the moment the prompt
+    # grows (a bigger floor eventually makes the check unpassable however well
+    # eviction works). Threshold sits midway between post- and pre-eviction
+    # usage, so only real paging clears pressure.
+    floor = approx_tokens(_serialize_for_estimate(mem, "system"))
+    full = floor + approx_tokens(_serialize_for_estimate(mem, "msgs", preload))
+    halved = floor + approx_tokens(_serialize_for_estimate(mem, "msgs", preload[len(preload) // 2:]))
+    limit = int(((full + halved) / 2) / 0.7)
+
     router = FakeRouter(
         [
             result(
@@ -372,25 +405,16 @@ def t4c_fifo_eviction_after_offload(tmp):
                     '{"content":"Summary of the earlier conversation.",'
                     '"request_heartbeat":true}',
                 )],
-                prompt_tokens=2400,
+                prompt_tokens=full,
             ),
             # prompt_tokens=0 forces the loop to estimate usage from the queue it
             # ACTUALLY still holds, so a stale pre-eviction count cannot fake the
-            # recovery. Un-evicted this estimates ~2370 tokens; evicted, ~1580,
-            # against a 1960 threshold — so only real eviction clears pressure.
-            # (The ~616-token system prompt is a floor eviction cannot touch, so
-            # the evictable messages have to dominate it for a clean signal.)
+            # recovery.
             result(tool_calls=[tc("send_message", '{"text":"done"}', cid="call_2")], prompt_tokens=0),
         ]
     )
-    loop = make_loop(mem, router, planning_context_limit=2800)
-    # 20 stale turns already in context, over the threshold.
-    filler = "recap of an earlier exchange, " * 10
-    preload: list[dict] = []
-    for i in range(10):
-        preload.append({"role": "user", "content": f"old user message {i}: {filler}"})
-        preload.append({"role": "assistant", "content": f"old reply {i}: {filler}"})
-    loop.seed_context(messages=preload, input_tokens=2400, limit=2800)
+    loop = make_loop(mem, router, planning_context_limit=limit)
+    loop.seed_context(messages=preload, input_tokens=full, limit=limit)
     before = len(loop.messages)
 
     loop.step("please summarize and continue")
@@ -398,7 +422,10 @@ def t4c_fifo_eviction_after_offload(tmp):
     after = len(loop.messages)
     shrank = after < before
     relieved = not loop.under_pressure()
-    notes = f"queue {before}->{after} pressure_after={loop.under_pressure()}"
+    notes = (
+        f"queue {before}->{after} pressure_after={loop.under_pressure()} "
+        f"(floor={floor} full={full} limit={limit})"
+    )
     if shrank and relieved:
         return True, notes
     if shrank or relieved:
