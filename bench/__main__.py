@@ -945,7 +945,18 @@ def run_live_smoke() -> list[str]:
 
 
 # --- runner ---------------------------------------------------------------
-def run(live: bool = False, json_out: str | None = None) -> int:
+def run_stress_tier() -> list[str]:
+    """The unscored stress scenarios (bench/stress.py), on the active backend."""
+    from bench.stress import run_stress
+
+    tmp = Path(tempfile.mkdtemp(prefix="bench_stress_"))
+    try:
+        return run_stress(tmp, make_memory, make_loop)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def run(live: bool = False, json_out: str | None = None, stress: bool = False) -> int:
     results = []
     for tier, cid, points, fn in CHECKS:
         tmp = Path(tempfile.mkdtemp(prefix=f"bench_{cid}_"))
@@ -976,6 +987,10 @@ def run(live: bool = False, json_out: str | None = None) -> int:
     print("\n" + "=" * 62)
     print(f"TOTAL: {total:g} / {possible}")
 
+    if stress:
+        for line in run_stress_tier():
+            print(line)
+
     if live:
         print("\nLive provider smoke (not scored)\n" + "-" * 62)
         for line in run_live_smoke():
@@ -993,5 +1008,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(prog="bench")
     ap.add_argument("--live", action="store_true", help="also run a real-provider smoke test")
     ap.add_argument("--json", dest="json_out", default=None, help="write results to a JSON file")
+    ap.add_argument(
+        "--stress",
+        action="store_true",
+        help="also run the unscored stress tier (long sessions, 50 facts, cooldowns)",
+    )
     args = ap.parse_args()
-    raise SystemExit(run(live=args.live, json_out=args.json_out))
+    raise SystemExit(run(live=args.live, json_out=args.json_out, stress=args.stress))

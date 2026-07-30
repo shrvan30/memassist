@@ -91,12 +91,23 @@ def render_system_prompt(core_memory: str, stats: dict, usage_str: str) -> str:
     )
 
 
-def eviction_notice(count: int) -> str:
-    """Marker left at the head of the FIFO in place of the evicted messages."""
+def eviction_notice(count: int, summarized: bool = True) -> str:
+    """Marker left at the head of the FIFO in place of the evicted messages.
+
+    Two wordings, because there are two ways to get here and telling the model
+    its context was summarized when it was not would be a lie it then acts on.
+    """
+    if summarized:
+        return (
+            f"[CONTEXT EVICTED] {count} older message(s) were summarized into "
+            "archival memory and removed from your context to free space. Search "
+            "archival or recall memory if you need their details."
+        )
     return (
-        f"[CONTEXT EVICTED] {count} older message(s) were summarized into "
-        "archival memory and removed from your context to free space. Search "
-        "archival or recall memory if you need their details."
+        f"[CONTEXT EVICTED] {count} older message(s) were removed from your "
+        "context because it reached its hard limit, and they were NOT summarized "
+        "first. They remain in recall memory — search it if you need their "
+        "details, and offload to archival sooner when warned about pressure."
     )
 
 

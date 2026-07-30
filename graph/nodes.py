@@ -333,8 +333,16 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
     # The summary is safe on "disk" now, so the summarized messages must leave
     # "RAM" — this is the paging half of the MemGPT mechanic.
     under = is_under_pressure(state["input_tokens"], state["limit"], deps.pressure_threshold)
-    if offloaded and under:
-        update.update(_evict_offloaded({**state, **update}, deps))
+    # …but that path needs the MODEL to cooperate by calling
+    # archival_memory_insert. A model that ignores the pressure warning would
+    # otherwise grow the queue for ever: the stress tier drove 100 turns to 219%
+    # of the limit with zero evictions. Paging is a safety property, so it
+    # cannot be contingent on the model doing as it is told.
+    over_hard_cap = usage_fraction(state["input_tokens"], state["limit"]) >= deps.hard_evict_fraction
+    if (offloaded and under) or over_hard_cap:
+        update.update(
+            _evict_offloaded({**state, **update}, deps, summarized=offloaded and under)
+        )
     return update
 
 
@@ -419,11 +427,17 @@ def _external_args(args: dict) -> dict:
 
 
 # --- eviction helpers -----------------------------------------------------
-def _evict_offloaded(state: AgentState, deps: Deps) -> dict:
-    """Drop the oldest half of the FIFO after it has been offloaded.
+def _evict_offloaded(state: AgentState, deps: Deps, summarized: bool = True) -> dict:
+    """Drop the oldest half of the FIFO to free context.
 
     Without this the queue only ever grows: the agent summarizes into archival,
     frees nothing, and the pressure warning fires on every subsequent turn.
+
+    ``summarized=False`` is the forced path — the hard cap fired because the
+    model never offloaded. The messages still leave the window, because the
+    alternative is a prompt the provider rejects outright, but the notice says
+    so honestly rather than claiming a summary that was never written. Nothing
+    is actually lost: the recall log has had every message since it arrived.
     """
     messages = list(state["messages"])
     total = len(messages)
@@ -434,7 +448,14 @@ def _evict_offloaded(state: AgentState, deps: Deps) -> dict:
         return {}
 
     retained = messages[cut:]
-    notice = eviction_notice(cut)
+    notice = eviction_notice(cut, summarized=summarized)
+    if not summarized:
+        _log.warning(
+            "Hard context cap hit at %d%% — evicting %d message(s) the model never "
+            "offloaded to archival.",
+            int(usage_fraction(state["input_tokens"], state["limit"]) * 100),
+            cut,
+        )
     retained.insert(0, {"role": "user", "content": notice})
     deps.memory.record_event("system_event", EVENT_EVICTION, notice)
     return {
