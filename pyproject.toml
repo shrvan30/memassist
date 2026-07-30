@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4"]
+dev = ["pytest>=7.4", "ruff>=0.6", "pip-audit>=2.7"]
 
 [tool.setuptools]
 packages = ["agent", "llm", "memory_server", "memory_server.storage"]
@@ -28,6 +28,15 @@ py-modules = ["config", "assembly"]
 [tool.setuptools.package-data]
 llm = ["providers.yaml"]
 
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Pinned explicitly: ruff's implicit default rule set widens between releases,
+# which would break CI on an unrelated ruff upgrade.
+select = ["E4", "E7", "E9", "F", "I"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["llm: needs live provider keys (deselected in CI)"]

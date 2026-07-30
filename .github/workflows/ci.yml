@@ -1,6 +1,6 @@
 name: ci
 on:
-  push: { branches: [main] }
+  push: { branches: [main, 'phase-*'] }
   pull_request:
 
 jobs:
@@ -26,7 +26,11 @@ jobs:
         env: { GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
 
       - name: Dependency audit
-        run: pip-audit -r requirements.txt
+        # PYSEC-2026-311: chromadb RCE via trust_remote_code on the /api/v2 HTTP
+        # endpoint. No fixed release exists, and MemAssist runs Chroma embedded
+        # (PersistentClient) with no server, so the endpoint does not exist here.
+        # Drop the ignore once chromadb ships a fix.
+        run: pip-audit -r requirements.txt --ignore-vuln PYSEC-2026-311
 
   # Nightly smoke benchmark (real free-tier keys via repo secrets).
   # Manual trigger only until quota impact is measured.
