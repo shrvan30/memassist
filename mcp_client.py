@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -82,27 +83,40 @@ class ExternalTools:
             return self
 
         self._start_loop()
-        connections = {
-            name: {
-                "transport": spec.get("transport", "stdio"),
-                "command": spec["command"],
-                "args": list(spec.get("args", [])),
-            }
-            for name, spec in self._specs.items()
-        }
+        connections = {name: _connection(spec) for name, spec in self._specs.items()}
         self._client = MultiServerMCPClient(connections)
         # Per server, not one aggregate call: a server that will not start then
         # costs only its own tools, and each tool's owner (and therefore its
         # trust zone) is known without having to guess.
-        for name in self._specs:
+        for name, spec in self._specs.items():
             try:
                 tools = self._run(self._client.get_tools(server_name=name))
             except Exception as exc:  # command not found, crash on boot, timeout…
                 self.errors[name] = f"{type(exc).__name__}: {exc}"
                 _log.warning("MCP server '%s' unavailable: %s", name, exc)
                 continue
+            wanted = spec.get("tools")
+            kept = 0
             for tool in tools:
+                # Every schema rides in EVERY prompt, on every turn, forever.
+                # An allowlist is the only thing that stops a server's whole
+                # surface from becoming a permanent context tax (spec §5.1).
+                if wanted is not None and tool.name not in wanted:
+                    continue
                 self._register(name, tool)
+                kept += 1
+            if wanted is not None:
+                missing = set(wanted) - self.names()
+                if missing:
+                    # The allowlist names a tool the server does not export —
+                    # a typo or a version drift. Say so; silently loading fewer
+                    # tools than configured is how capability vanishes quietly.
+                    _log.warning(
+                        "MCP server '%s': allowlisted tools not exported: %s",
+                        name,
+                        ", ".join(sorted(missing)),
+                    )
+                _log.info("MCP server '%s': kept %d of %d tools", name, kept, len(tools))
         _log.info("External MCP tools loaded: %s", ", ".join(sorted(self._trust)) or "none")
         return self
 
@@ -202,6 +216,25 @@ class ExternalTools:
 
 
 # --- helpers --------------------------------------------------------------
+def _connection(spec: dict) -> dict:
+    """Registry entry -> a langchain-mcp-adapters connection.
+
+    stdio spawns a subprocess; streamable_http talks to a service that is
+    already running (its own container, its own healthcheck). Environment
+    expansion means a compose file can point at a service name without the
+    registry hardcoding one.
+    """
+    transport = spec.get("transport", "stdio")
+    if transport in ("streamable_http", "streamable-http", "http"):
+        url = os.path.expandvars(str(spec["url"]))
+        return {"transport": "streamable_http", "url": url}
+    return {
+        "transport": "stdio",
+        "command": spec["command"],
+        "args": [os.path.expandvars(str(a)) for a in spec.get("args", [])],
+    }
+
+
 def _as_text(result: Any) -> str:
     """Flatten an MCP CallToolResult (or whatever the adapter returned) to text."""
     content = getattr(result, "content", result)

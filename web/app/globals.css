@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #0b1020;
+  --color-panel: #131a2e;
+  --color-edge: #26304d;
+}
+
+html, body { height: 100%; }
+body { @apply bg-[var(--color-ink)] text-slate-200 antialiased; }

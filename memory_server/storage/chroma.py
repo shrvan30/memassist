@@ -104,24 +104,34 @@ class ArchivalStore:
         total = self.count()
         if total == 0:
             return [], 0
-        wanted = min(top_k * (page + 1), total)
+        # ponytail: fetch the whole collection and page locally. Fetching only
+        # top_k*(page+1) is cheaper, but then page 0 sorts a 2-row candidate set
+        # while page 1 sorts a 4-row one — with tied distances those disagree and
+        # consecutive pages repeat a passage. Fine at MVP scale; the pgvector
+        # backend pages in SQL and has no such limit.
         res = self._col.query(
             query_embeddings=[self._embed(query)],
-            n_results=wanted,
+            n_results=total,
             include=["documents", "metadatas", "distances"],
         )
         docs = res["documents"][0]
         metas = res["metadatas"][0]
         dists = res["distances"][0]
+        ids = res.get("ids", [[]])[0] or [""] * len(docs)
         items = [
             {
+                "id": pid,
                 "content": doc,
                 "created_at": (meta or {}).get("created_at"),
                 "source": (meta or {}).get("source"),
                 "distance": dist,
             }
-            for doc, meta, dist in zip(docs, metas, dists)
+            for pid, doc, meta, dist in zip(ids, docs, metas, dists)
         ]
+        # Tie-break on id. Equally-distant passages otherwise come back in
+        # whatever order the index felt like this call, so consecutive pages
+        # could repeat one passage and drop another.
+        items.sort(key=lambda item: (item["distance"], item["id"]))
         start = page * top_k
         return items[start : start + top_k], total
 
