@@ -128,6 +128,25 @@ class ExternalTools:
     def server_of(self, tool_name: str) -> str | None:
         return self._server_of.get(tool_name)
 
+    def is_gated(self, tool_name: str) -> bool:
+        """True if this tool needs human approval before it runs (spec §6.3).
+
+        A ``write_gate`` server with no explicit ``gated_tools`` gates
+        everything it exports — failing closed, because guessing which of a
+        stranger's fourteen tools mutate the disk is exactly the guess that
+        ends with a file overwritten.
+        """
+        spec = self._specs.get(self._server_of.get(tool_name, ""), {})
+        if not spec.get("write_gate"):
+            return False
+        gated = spec.get("gated_tools")
+        return tool_name in gated if gated else True
+
+    def jail_of(self, tool_name: str) -> str | None:
+        """Directory this tool's server is confined to, if the registry sets one."""
+        spec = self._specs.get(self._server_of.get(tool_name, ""), {})
+        return spec.get("jail")
+
     def call(self, tool_name: str, arguments: dict) -> str:
         """Invoke an external tool. Errors become strings, never exceptions."""
         if self._client is None or tool_name not in self._server_of:

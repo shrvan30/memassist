@@ -4,8 +4,9 @@ Each node takes ``(state, deps)`` and returns a partial ``AgentState``. The
 behaviour is the Phase 1.5 ``AgentLoop`` verbatim — only the seams between the
 steps are new, so the benchmark score is a real regression gate.
 
-``security_gate`` and ``sanitize_results`` are pass-through stubs: Phase 2 puts
-the seams in the graph, Phase 3 fills them in (spec §6).
+``security_gate`` and ``sanitize_results`` are the security layer's two seams:
+nothing untrusted reaches the model unsanitized, and nothing untrusted reaches
+core memory at all (spec §6).
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+
+from langgraph.types import interrupt
 
 from agent.prompts import eviction_notice, memory_pressure_warning, render_system_prompt
 from agent.token_budget import approx_tokens, format_usage, is_under_pressure, usage_fraction
@@ -43,6 +46,12 @@ MIN_MESSAGES_BEFORE_EVICTION = 8
 # Shown when every provider in the chain is rate-limited, out of quota, or
 # misconfigured. The user gets plain language; the detail goes to the log and to
 # the provider-status panel, where it is actually actionable.
+DENIED_BY_USER = (
+    "Error: the user denied this action, so it was not performed. Do not retry "
+    "it or attempt an equivalent action by another route. Acknowledge the "
+    "refusal and continue with what you can do."
+)
+
 PROVIDERS_EXHAUSTED_MESSAGE = (
     "I've hit the free-tier limit on every language-model provider I can reach, "
     "so I can't think of a reply right now. Your message is saved in my memory — "
@@ -145,16 +154,21 @@ def security_gate(state: AgentState, deps: Deps) -> dict:
     Decisions are recorded per tool_call_id; ``dispatch_tools`` executes them.
     """
     allowed = deps.allowed_tools()
+    external = deps.external
     saw_untrusted = bool(state.get("saw_untrusted"))
     decisions: dict[str, dict] = {}
-    blocked: list[str] = []
+    gated: list[dict] = []
 
+    # Pure evaluation first. Everything above the interrupt() below runs again
+    # on resume, so nothing here may have a side effect.
     for tc in state.get("pending_tool_calls") or []:
         decision = check_tool_call(
             tc.name,
             tc.parsed_arguments(),
             allowed_tools=allowed,
             saw_untrusted=saw_untrusted,
+            jail=external.jail_of(tc.name) if external else None,
+            gated=external.is_gated(tc.name) if external else False,
         )
         decisions[tc.id] = {
             "allowed": decision.allowed,
@@ -162,18 +176,48 @@ def security_gate(state: AgentState, deps: Deps) -> dict:
             "reason": decision.reason,
             "rewritten": decision.rewritten,
         }
-        if decision.refused:
-            blocked.append(tc.name)
-            _log.warning("Guard refused %s: %s", tc.name, decision.reason)
-            deps.memory.record_event(
-                "system_event", EVENT_SECURITY, f"Guard refused {tc.name}: {decision.reason}"
+        if decision.requires_approval:
+            gated.append(
+                {"tool_call_id": tc.id, "name": tc.name, "arguments": decision.arguments}
             )
-        elif decision.rewritten:
+
+    approved = True
+    if gated:
+        # Suspends the whole turn until a human answers. The checkpointer is
+        # what makes this possible — the graph resumes into the state it left.
+        approved = bool(interrupt({"kind": "tool_approval", "actions": gated}))
+        for action in gated:
+            if not approved:
+                decisions[action["tool_call_id"]] = {
+                    "allowed": False,
+                    "arguments": action["arguments"],
+                    "reason": DENIED_BY_USER,
+                    "rewritten": "",
+                }
+
+    # Side effects only below the interrupt, so they happen exactly once.
+    blocked: list[str] = []
+    for tc in state.get("pending_tool_calls") or []:
+        decision = decisions[tc.id]
+        if not decision["allowed"]:
+            blocked.append(tc.name)
+            _log.warning("Guard refused %s: %s", tc.name, decision["reason"])
+            deps.memory.record_event(
+                "system_event", EVENT_SECURITY, f"Guard refused {tc.name}: {decision['reason']}"
+            )
+        elif decision["rewritten"]:
             deps.memory.record_event(
                 "system_event",
                 EVENT_SECURITY,
-                f"Guard rewrote {tc.name} arguments: {decision.rewritten}",
+                f"Guard rewrote {tc.name} arguments: {decision['rewritten']}",
             )
+    if gated:
+        deps.memory.record_event(
+            "system_event",
+            EVENT_SECURITY,
+            f"Human {'approved' if approved else 'denied'}: "
+            f"{', '.join(a['name'] for a in gated)}",
+        )
 
     return {
         "tool_decisions": decisions,

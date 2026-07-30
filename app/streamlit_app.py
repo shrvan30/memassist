@@ -110,6 +110,58 @@ def render_sidebar(loop) -> None:
             st.rerun()
 
 
+def deliver(loop, outputs) -> None:
+    """Show the agent's messages and keep them in the visible transcript."""
+    served_by = loop.served_by
+    for text in outputs:
+        st.markdown(text)
+        if served_by:
+            st.caption(f"⚡ served by {served_by}")
+        st.session_state.chat.append(
+            {"role": "assistant", "text": text, "served_by": served_by}
+        )
+
+
+def approval_gate(loop) -> bool:
+    """Render approve/deny for a suspended turn. True if the turn is still waiting.
+
+    The graph is paused inside ``security_gate``; nothing has run yet. Answering
+    resumes it, so this is a real gate rather than a notification after the fact.
+    """
+    pending = loop.pending_approval
+    if not pending:
+        return False
+
+    with st.chat_message("assistant"):
+        st.warning("⛔ The assistant wants to perform a gated action and needs your approval.")
+        for action in pending.get("actions", []):
+            st.markdown(f"**{action['name']}**")
+            st.json(action.get("arguments", {}), expanded=True)
+        st.caption(
+            "Filesystem writes are confined to ./workspace and always require "
+            "approval. Deny if you did not ask for this — a web page or a file "
+            "can try to talk the assistant into it."
+        )
+        approve, deny = st.columns(2)
+        decision = None
+        if approve.button("✅ Approve", use_container_width=True):
+            decision = True
+        if deny.button("🚫 Deny", use_container_width=True):
+            decision = False
+
+    if decision is None:
+        return True  # still waiting on the human
+
+    with st.chat_message("assistant"):
+        with st.spinner("Resuming…"):
+            try:
+                deliver(loop, loop.resume(approved=decision))
+            except Exception as exc:
+                st.error(f"Something went wrong: {exc}")
+    st.rerun()
+    return False
+
+
 def main() -> None:
     onboarding_gate()
     loop = get_loop()
@@ -127,6 +179,11 @@ def main() -> None:
             if msg["role"] == "assistant" and msg.get("served_by"):
                 st.caption(f"⚡ served by {msg['served_by']}")
 
+    # A suspended turn owns the UI until it is answered: taking a new message
+    # first would leave the graph paused mid-turn behind the user's back.
+    if approval_gate(loop):
+        return
+
     prompt = st.chat_input("Message MemAssist…")
     if not prompt:
         return
@@ -142,16 +199,9 @@ def main() -> None:
             except Exception as exc:  # surface API/router errors without crashing
                 st.error(f"Something went wrong: {exc}")
                 return
-        served_by = loop.served_by
-        if not outputs:
+        if not outputs and not loop.pending_approval:
             outputs = ["(The assistant finished without sending a message.)"]
-        for text in outputs:
-            st.markdown(text)
-            if served_by:
-                st.caption(f"⚡ served by {served_by}")
-            st.session_state.chat.append(
-                {"role": "assistant", "text": text, "served_by": served_by}
-            )
+        deliver(loop, outputs)
 
     st.rerun()
 
