@@ -18,6 +18,8 @@ dependencies = [
     "psycopg[binary]>=3.1",  # Postgres backend
     "pgvector>=0.2",         # vector(384) adapter
     "sentence-transformers>=2.7",  # local bge-small-en-v1.5 embeddings (384-d)
+    "fastapi>=0.110",        # api/ service
+    "uvicorn[standard]>=0.27",
     "streamlit>=1.30",
     "pydantic>=2.5",
     "python-dotenv>=1.0",
@@ -27,7 +29,7 @@ dependencies = [
 dev = ["pytest>=7.4", "ruff>=0.6", "pip-audit>=2.7"]
 
 [tool.setuptools]
-packages = ["agent", "graph", "llm", "memory_server", "memory_server.storage"]
+packages = ["agent", "api", "graph", "llm", "memory_server", "memory_server.storage", "security"]
 py-modules = ["config", "assembly", "mcp_client"]
 
 [tool.setuptools.package-data]

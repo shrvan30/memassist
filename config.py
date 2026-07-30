@@ -59,6 +59,18 @@ TOOL_RESULT_CHAR_CAP: int = int(os.getenv("MEMASSIST_TOOL_RESULT_CHAR_CAP", "400
 MCP_SERVERS_YAML: str = os.getenv("MEMASSIST_MCP_SERVERS_YAML", str(ROOT / "mcp_servers.yaml"))
 EXTERNAL_TOOLS: bool = os.getenv("MEMASSIST_EXTERNAL_TOOLS", "1") not in ("0", "false", "False")
 
+# --- API service (Phase 4) -----------------------------------------------
+API_DEFAULT_SESSION: str = os.getenv("MEMASSIST_DEFAULT_SESSION", "default")
+# Browsers block cross-origin SSE without this; the Next.js dev server and the
+# compose web service are the two origins that legitimately call the API.
+API_CORS_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.getenv(
+        "MEMASSIST_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+    ).split(",")
+    if o.strip()
+]
+
 # --- Storage backend (spec §8) -------------------------------------------
 # "sqlite" -> SQLite + Chroma (zero-setup default, what the benchmark uses)
 # "postgres" -> Postgres + pgvector, one DSN for all four tables

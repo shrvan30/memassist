@@ -64,6 +64,7 @@ class FakeExternal:
         self._gated = frozenset(gated)
         self._jail = jail
         self.calls: list[tuple[str, dict]] = []
+        self.errors: dict[str, str] = {}
 
     def names(self):
         return self._tools
@@ -83,6 +84,9 @@ class FakeExternal:
     def call(self, name, arguments):
         self.calls.append((name, arguments))
         return self._result
+
+    def close(self):
+        pass
 
 
 @pytest.fixture
