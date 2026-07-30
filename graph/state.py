@@ -60,7 +60,22 @@ class AgentState(TypedDict, total=False):
     served_by: str | None       # provider that answered the last call
     last_text: str              # assistant prose, surfaced only as a fallback
     final_reply: list[str]      # what step() returns to the caller
-    gated_action: dict | None   # Phase 3: tool call awaiting human approval
+    gated_action: dict | None   # tool call awaiting human approval
+
+    # -- security ----------------------------------------------------------
+    untrusted_results: list     # results from trust=untrusted servers, awaiting
+                                # sanitize_results (spec §6.1)
+    saw_untrusted: bool         # an untrusted result entered context this turn,
+                                # so core memory is closed for the rest of it
+
+
+class ExternalToolset(Protocol):
+    """The slice of ``mcp_client.ExternalTools`` the graph depends on."""
+
+    def names(self) -> frozenset[str]: ...
+    def trust_of(self, tool_name: str) -> str: ...
+    def server_of(self, tool_name: str) -> str | None: ...
+    def call(self, tool_name: str, arguments: dict) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -73,6 +88,7 @@ class Deps:
     planning_context_limit: int
     pressure_threshold: float
     max_heartbeats: int
+    external: ExternalToolset | None = None
 
     def limit_for(self, provider: str | None) -> int:
         """Context budget against the ACTIVE provider's window.

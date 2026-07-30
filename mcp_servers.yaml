@@ -1,8 +1,18 @@
 # External MCP server registry — max 3 active (schemas cost context tokens).
-# trust: internal = pass-through · untrusted = results MUST pass sanitizer.
-# Verify package names against current MCP docs before first run.
+#
+# trust: internal   = results pass through untouched
+#        untrusted  = results MUST pass security/sanitizer.py before the model
+#                     sees them, and can never reach core memory (spec §6.3)
+#
+# Verified 2026-07-30 against the live package: `uvx duckduckgo-mcp-server`
+# starts on stdio and exports search + fetch_content.
 
 servers:
+  # Our own memory server. Dispatched IN-PROCESS by MemoryTools, not over stdio:
+  # same code either way, and a subprocess hop would add latency and
+  # non-determinism to the benchmark for no isolation benefit (it is internal by
+  # definition). The stdio entry point still exists — `python -m memory_server`,
+  # registered in .mcp.json — so Claude Code/Desktop can drive the same memory.
   memgpt-memory:
     transport: stdio
     command: python
@@ -14,6 +24,7 @@ servers:
     command: uvx
     args: ["duckduckgo-mcp-server"]
     trust: untrusted          # web content = hostile until sanitized
+    enabled: true
     # optional upgrade: swap for Tavily MCP when TAVILY_API_KEY is set
 
   filesystem:
@@ -21,4 +32,5 @@ servers:
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
     trust: untrusted
-    write_gate: true          # all writes require human_interrupt approval
+    write_gate: true          # every write requires human_interrupt approval
+    enabled: false            # step 4

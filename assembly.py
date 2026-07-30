@@ -10,6 +10,7 @@ from __future__ import annotations
 import config
 import llm
 from agent.loop import AgentLoop
+from mcp_client import ExternalTools, build_external_tools
 from memory_server.memory_tools import MemoryTools
 from memory_server.schemas import ALL_TOOLS
 from memory_server.storage.chroma import ArchivalStore
@@ -50,15 +51,29 @@ def build_router(db_path: str | None = None) -> llm.Router:
     )
 
 
+def build_tools(enabled: bool | None = None) -> ExternalTools:
+    """Start the external MCP servers listed in ``mcp_servers.yaml`` (spec §5.1).
+
+    Never fatal: a missing ``uvx`` or a server that will not boot costs the
+    assistant a capability, not a startup.
+    """
+    if not (config.EXTERNAL_TOOLS if enabled is None else enabled):
+        return ExternalTools({})
+    return build_external_tools(config.MCP_SERVERS_YAML)
+
+
 def build_loop(
     memory: MemoryTools | None = None,
     router: "llm.Router | None" = None,
+    external: ExternalTools | None = None,
 ) -> AgentLoop:
+    external = build_tools() if external is None else external
     return AgentLoop(
         router or build_router(),
         memory or build_memory(),
-        ALL_TOOLS,
+        [*ALL_TOOLS, *external.tool_definitions()],
         planning_context_limit=config.CONTEXT_LIMIT,
         pressure_threshold=config.PRESSURE_THRESHOLD,
         max_heartbeats=config.MAX_HEARTBEATS,
+        external=external,
     )

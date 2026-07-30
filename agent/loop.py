@@ -39,6 +39,7 @@ class AgentLoop:
         planning_context_limit: int,
         pressure_threshold: float,
         max_heartbeats: int,
+        external=None,
     ) -> None:
         self.router = router
         self.memory = memory
@@ -46,6 +47,7 @@ class AgentLoop:
         self.planning_context_limit = planning_context_limit
         self.pressure_threshold = pressure_threshold
         self.max_heartbeats = max_heartbeats
+        self.external = external
 
         self._deps = Deps(
             router=router,
@@ -54,6 +56,7 @@ class AgentLoop:
             planning_context_limit=planning_context_limit,
             pressure_threshold=pressure_threshold,
             max_heartbeats=max_heartbeats,
+            external=external,
         )
         # ponytail: InMemorySaver keeps every checkpoint for the life of the
         # thread. reset() rotates the thread id, which is what bounds it in

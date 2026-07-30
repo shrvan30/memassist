@@ -20,6 +20,12 @@ from llm.errors import AllProvidersExhausted
 
 from .state import AgentState, Deps
 
+TRUST_UNTRUSTED = "untrusted"
+
+# request_heartbeat is ours, not the external server's — sending it along would
+# be an unknown argument and the call would fail schema validation.
+_AGENT_ONLY_ARGS = frozenset({"request_heartbeat"})
+
 EVENT_MESSAGE = "message"
 EVENT_TOOL_CALL = "tool_call"
 EVENT_TOOL_RESULT = "tool_result"
@@ -147,6 +153,10 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
     wants_heartbeat = False
     offloaded = False
 
+    external = deps.external
+    external_names = external.names() if external else frozenset()
+    untrusted: list[dict] = []
+
     for tc in state["pending_tool_calls"]:
         args = tc.parsed_arguments()
         if tc.name == "send_message":
@@ -159,12 +169,29 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
             deps.memory.record_event(
                 "assistant", EVENT_TOOL_CALL, f"{tc.name}({tc.arguments})", served_by=served_by
             )
-            tool_content = deps.memory.dispatch(tc.name, args)
-            deps.memory.record_event(
-                "tool", EVENT_TOOL_RESULT, f"{tc.name} -> {tool_content}"
-            )
-            if tc.name == "archival_memory_insert" and not tool_content.startswith("Error:"):
-                offloaded = True
+            if tc.name in external_names:
+                tool_content = external.call(tc.name, _external_args(args))
+                # The VERBATIM result goes to recall before anything rewrites it
+                # — the sanitized copy is what the model sees, the original is
+                # what an audit reads (spec §6.2).
+                deps.memory.record_event(
+                    "tool", EVENT_TOOL_RESULT, f"{tc.name} -> {tool_content}"
+                )
+                if external.trust_of(tc.name) == TRUST_UNTRUSTED:
+                    untrusted.append(
+                        {
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "server": external.server_of(tc.name),
+                        }
+                    )
+            else:
+                tool_content = deps.memory.dispatch(tc.name, args)
+                deps.memory.record_event(
+                    "tool", EVENT_TOOL_RESULT, f"{tc.name} -> {tool_content}"
+                )
+                if tc.name == "archival_memory_insert" and not tool_content.startswith("Error:"):
+                    offloaded = True
             if args.get("request_heartbeat"):
                 wants_heartbeat = True
         # Every tool_call must be answered before the next model call.
@@ -174,6 +201,7 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
         "messages": messages,
         "final_reply": outputs,
         "pending_tool_calls": [],
+        "untrusted_results": untrusted,
         "heartbeat_count": state.get("heartbeat_count", 0) + 1,
         # Delivered a reply and not explicitly chaining -> the turn is over.
         "done": sent_message and not wants_heartbeat,
@@ -211,6 +239,10 @@ def respond(state: AgentState, deps: Deps) -> dict:
             "assistant", EVENT_MESSAGE, last_text, served_by=state.get("served_by")
         )
     return {"final_reply": outputs, "done": True}
+
+
+def _external_args(args: dict) -> dict:
+    return {k: v for k, v in args.items() if k not in _AGENT_ONLY_ARGS}
 
 
 # --- eviction helpers -----------------------------------------------------
