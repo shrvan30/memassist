@@ -20,6 +20,7 @@ from typing import Any, Iterator
 
 import assembly
 import config
+import observability
 from agent.loop import AgentLoop
 
 _log = logging.getLogger(__name__)
@@ -146,6 +147,8 @@ class SessionRegistry:
         if self._external is not None:
             self._external.close()
         assembly.close_checkpointers()
+        # Traces are batched, so the last few turns are still in a buffer.
+        observability.shutdown()
 
     def get(self, session_id: str) -> Session:
         with self._lock:

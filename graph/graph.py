@@ -25,6 +25,8 @@ from functools import partial
 
 from langgraph.graph import END, START, StateGraph
 
+import observability
+
 from . import nodes
 from .state import AgentState, Deps
 
@@ -73,7 +75,12 @@ def build_graph(deps: Deps, checkpointer=None):
         "sanitize_results",
         "respond",
     ):
-        g.add_node(name, partial(getattr(nodes, name), deps=deps))
+        # Each node is its own span, so a trace shows where a turn spent its
+        # time. A no-op branch when tracing is off (observability.traced_node).
+        g.add_node(
+            name,
+            observability.traced_node(partial(getattr(nodes, name), deps=deps), name),
+        )
 
     g.add_edge(START, "build_prompt")
     g.add_edge("build_prompt", "pressure_check")

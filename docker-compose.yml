@@ -69,6 +69,10 @@ services:
       # External MCP servers need uvx/npx, which this image does not carry.
       # Set to 1 once you add them, or point the registry at HTTP services.
       MEMASSIST_EXTERNAL_TOOLS: ${MEMASSIST_EXTERNAL_TOOLS:-0}
+      # Tracing is inert unless both keys are set (observability.py).
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -85,6 +89,37 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+    restart: unless-stopped
+
+  # Opt-in: `docker compose --profile jobs up`. Off by default because it sends
+  # conversation to Mistral, and that should be a decision someone makes rather
+  # than a side effect of `docker compose up`. Needs MISTRAL_API_KEY; without
+  # one every pass logs "provider unavailable" and writes nothing.
+  consolidate:
+    profiles: ["jobs"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - "python"
+      - "-m"
+      - "jobs.consolidate"
+      - "--every"
+      - "${MEMASSIST_CONSOLIDATE_EVERY:-6h}"
+      - "--limit"
+      - "${MEMASSIST_CONSOLIDATE_LIMIT:-100}"
+    environment:
+      MEMASSIST_POSTGRES_DSN: postgresql://${POSTGRES_USER:-memassist}:${POSTGRES_PASSWORD:-memassist}@postgres:5432/${POSTGRES_DB:-memassist}
+      MEMASSIST_STORAGE_BACKEND: postgres
+      MEMASSIST_EXTERNAL_TOOLS: "0"
+      HF_HOME: /opt/models
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   web:
