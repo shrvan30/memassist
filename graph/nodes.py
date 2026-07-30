@@ -4,8 +4,9 @@ Each node takes ``(state, deps)`` and returns a partial ``AgentState``. The
 behaviour is the Phase 1.5 ``AgentLoop`` verbatim — only the seams between the
 steps are new, so the benchmark score is a real regression gate.
 
-``security_gate`` and ``sanitize_results`` are pass-through stubs: Phase 2 puts
-the seams in the graph, Phase 3 fills them in (spec §6).
+``security_gate`` and ``sanitize_results`` are the security layer's two seams:
+nothing untrusted reaches the model unsanitized, and nothing untrusted reaches
+core memory at all (spec §6).
 """
 
 from __future__ import annotations
@@ -14,11 +15,21 @@ import json
 import logging
 from typing import Any
 
+from langgraph.types import interrupt
+
 from agent.prompts import eviction_notice, memory_pressure_warning, render_system_prompt
 from agent.token_budget import approx_tokens, format_usage, is_under_pressure, usage_fraction
 from llm.errors import AllProvidersExhausted
+from security.guards import check_tool_call
+from security.sanitizer import sanitize_external
 
 from .state import AgentState, Deps
+
+TRUST_UNTRUSTED = "untrusted"
+
+# request_heartbeat is ours, not the external server's — sending it along would
+# be an unknown argument and the call would fail schema validation.
+_AGENT_ONLY_ARGS = frozenset({"request_heartbeat"})
 
 EVENT_MESSAGE = "message"
 EVENT_TOOL_CALL = "tool_call"
@@ -26,6 +37,7 @@ EVENT_TOOL_RESULT = "tool_result"
 EVENT_PRESSURE_WARNING = "pressure_warning"
 EVENT_EVICTION = "eviction"
 EVENT_INTERNAL = "internal"
+EVENT_SECURITY = "security"
 
 # Below this many messages there is nothing worth paging out, so an offload
 # leaves the queue alone.
@@ -34,6 +46,12 @@ MIN_MESSAGES_BEFORE_EVICTION = 8
 # Shown when every provider in the chain is rate-limited, out of quota, or
 # misconfigured. The user gets plain language; the detail goes to the log and to
 # the provider-status panel, where it is actually actionable.
+DENIED_BY_USER = (
+    "Error: the user denied this action, so it was not performed. Do not retry "
+    "it or attempt an equivalent action by another route. Acknowledge the "
+    "refusal and continue with what you can do."
+)
+
 PROVIDERS_EXHAUSTED_MESSAGE = (
     "I've hit the free-tier limit on every language-model provider I can reach, "
     "so I can't think of a reply right now. Your message is saved in my memory — "
@@ -129,13 +147,83 @@ def call_llm(state: AgentState, deps: Deps) -> dict:
 
 
 def security_gate(state: AgentState, deps: Deps) -> dict:
-    """Pass-through stub (spec §6.3).
+    """Rule on every pending tool call before anything runs (spec §6.3).
 
-    Phase 3 inspects ``pending_tool_calls`` here and parks a destructive one in
-    ``gated_action`` for a human interrupt. Phase 2 dispatches only the six own
-    memory tools, none of which is destructive, so nothing is gated yet.
+    Deny-by-default on the node's allowlist, core memory closed once untrusted
+    content is in the turn, and archival writes forced to ``source=external``.
+    Decisions are recorded per tool_call_id; ``dispatch_tools`` executes them.
     """
-    return {"gated_action": None}
+    allowed = deps.allowed_tools()
+    external = deps.external
+    saw_untrusted = bool(state.get("saw_untrusted"))
+    decisions: dict[str, dict] = {}
+    gated: list[dict] = []
+
+    # Pure evaluation first. Everything above the interrupt() below runs again
+    # on resume, so nothing here may have a side effect.
+    for tc in state.get("pending_tool_calls") or []:
+        decision = check_tool_call(
+            tc.name,
+            tc.parsed_arguments(),
+            allowed_tools=allowed,
+            saw_untrusted=saw_untrusted,
+            jail=external.jail_of(tc.name) if external else None,
+            gated=external.is_gated(tc.name) if external else False,
+        )
+        decisions[tc.id] = {
+            "allowed": decision.allowed,
+            "arguments": decision.arguments,
+            "reason": decision.reason,
+            "rewritten": decision.rewritten,
+        }
+        if decision.requires_approval:
+            gated.append(
+                {"tool_call_id": tc.id, "name": tc.name, "arguments": decision.arguments}
+            )
+
+    approved = True
+    if gated:
+        # Suspends the whole turn until a human answers. The checkpointer is
+        # what makes this possible — the graph resumes into the state it left.
+        approved = bool(interrupt({"kind": "tool_approval", "actions": gated}))
+        for action in gated:
+            if not approved:
+                decisions[action["tool_call_id"]] = {
+                    "allowed": False,
+                    "arguments": action["arguments"],
+                    "reason": DENIED_BY_USER,
+                    "rewritten": "",
+                }
+
+    # Side effects only below the interrupt, so they happen exactly once.
+    blocked: list[str] = []
+    for tc in state.get("pending_tool_calls") or []:
+        decision = decisions[tc.id]
+        if not decision["allowed"]:
+            blocked.append(tc.name)
+            _log.warning("Guard refused %s: %s", tc.name, decision["reason"])
+            deps.memory.record_event(
+                "system_event", EVENT_SECURITY, f"Guard refused {tc.name}: {decision['reason']}"
+            )
+        elif decision["rewritten"]:
+            deps.memory.record_event(
+                "system_event",
+                EVENT_SECURITY,
+                f"Guard rewrote {tc.name} arguments: {decision['rewritten']}",
+            )
+    if gated:
+        deps.memory.record_event(
+            "system_event",
+            EVENT_SECURITY,
+            f"Human {'approved' if approved else 'denied'}: "
+            f"{', '.join(a['name'] for a in gated)}",
+        )
+
+    return {
+        "tool_decisions": decisions,
+        "blocked_tools": [*state.get("blocked_tools", []), *blocked],
+        "gated_action": None,
+    }
 
 
 def dispatch_tools(state: AgentState, deps: Deps) -> dict:
@@ -147,8 +235,28 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
     wants_heartbeat = False
     offloaded = False
 
+    external = deps.external
+    external_names = external.names() if external else frozenset()
+    decisions = state.get("tool_decisions") or {}
+    untrusted: list[dict] = []
+
     for tc in state["pending_tool_calls"]:
-        args = tc.parsed_arguments()
+        decision = decisions.get(tc.id)
+        if decision is not None and not decision["allowed"]:
+            # Refused by security_gate. The call is still ANSWERED — an
+            # unanswered tool_call is a transcript providers reject — but with
+            # the refusal text instead of a result.
+            deps.memory.record_event(
+                "assistant", EVENT_TOOL_CALL, f"{tc.name}({tc.arguments}) [refused]",
+                served_by=served_by,
+            )
+            messages.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": decision["reason"]}
+            )
+            wants_heartbeat = True  # let the model recover on the next round
+            continue
+
+        args = decision["arguments"] if decision is not None else tc.parsed_arguments()
         if tc.name == "send_message":
             text = args.get("text", "")
             outputs.append(text)
@@ -159,12 +267,29 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
             deps.memory.record_event(
                 "assistant", EVENT_TOOL_CALL, f"{tc.name}({tc.arguments})", served_by=served_by
             )
-            tool_content = deps.memory.dispatch(tc.name, args)
-            deps.memory.record_event(
-                "tool", EVENT_TOOL_RESULT, f"{tc.name} -> {tool_content}"
-            )
-            if tc.name == "archival_memory_insert" and not tool_content.startswith("Error:"):
-                offloaded = True
+            if tc.name in external_names:
+                tool_content = external.call(tc.name, _external_args(args))
+                # The VERBATIM result goes to recall before anything rewrites it
+                # — the sanitized copy is what the model sees, the original is
+                # what an audit reads (spec §6.2).
+                deps.memory.record_event(
+                    "tool", EVENT_TOOL_RESULT, f"{tc.name} -> {tool_content}"
+                )
+                if external.trust_of(tc.name) == TRUST_UNTRUSTED:
+                    untrusted.append(
+                        {
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "server": external.server_of(tc.name),
+                        }
+                    )
+            else:
+                tool_content = deps.memory.dispatch(tc.name, args)
+                deps.memory.record_event(
+                    "tool", EVENT_TOOL_RESULT, f"{tc.name} -> {tool_content}"
+                )
+                if tc.name == "archival_memory_insert" and not tool_content.startswith("Error:"):
+                    offloaded = True
             if args.get("request_heartbeat"):
                 wants_heartbeat = True
         # Every tool_call must be answered before the next model call.
@@ -174,6 +299,7 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
         "messages": messages,
         "final_reply": outputs,
         "pending_tool_calls": [],
+        "untrusted_results": untrusted,
         "heartbeat_count": state.get("heartbeat_count", 0) + 1,
         # Delivered a reply and not explicitly chaining -> the turn is over.
         "done": sent_message and not wants_heartbeat,
@@ -188,13 +314,53 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
 
 
 def sanitize_results(state: AgentState, deps: Deps) -> dict:
-    """Pass-through stub (spec §6.2).
+    """Rewrite untrusted tool results as marked-up data (spec §6.2).
 
-    Phase 3 wraps results from trust=untrusted MCP servers in
-    ``<untrusted_content>`` markers here, before they enter state. Phase 2 has
-    only the trusted-internal memory server, whose results pass through.
+    The raw result is already in recall memory (``dispatch_tools`` logs it
+    verbatim for audit); what the *model* sees is only ever the sanitized copy,
+    because the next ``call_llm`` happens strictly after this node.
+
+    ``saw_untrusted`` latches for the rest of the turn: once hostile content is
+    in the window, no later tool call in the same turn can be assumed to be the
+    user's idea, so the guards close core memory (§6.3).
     """
-    return {}
+    pending = state.get("untrusted_results") or []
+    if not pending:
+        return {}
+
+    by_id = {item["tool_call_id"]: item for item in pending}
+    messages = list(state["messages"])
+    flagged: list[str] = []
+
+    for i, message in enumerate(messages):
+        if message.get("role") != "tool":
+            continue
+        item = by_id.get(message.get("tool_call_id"))
+        if item is None:
+            continue
+        clean = sanitize_external(
+            str(message.get("content", "")),
+            source=f"{item['name']} via {item['server'] or 'external server'}",
+            char_cap=deps.tool_result_char_cap,
+        )
+        messages[i] = {**message, "content": clean.text}
+        if clean.flags:
+            flagged.extend(clean.flags)
+            _log.warning(
+                "Prompt injection flagged in %s result: %s", item["name"], ", ".join(clean.flags)
+            )
+            deps.memory.record_event(
+                "system_event",
+                EVENT_SECURITY,
+                f"Injection patterns flagged in {item['name']} result: {', '.join(clean.flags)}",
+            )
+
+    return {
+        "messages": messages,
+        "untrusted_results": [],
+        "saw_untrusted": True,
+        "injection_flags": [*state.get("injection_flags", []), *flagged],
+    }
 
 
 def respond(state: AgentState, deps: Deps) -> dict:
@@ -211,6 +377,10 @@ def respond(state: AgentState, deps: Deps) -> dict:
             "assistant", EVENT_MESSAGE, last_text, served_by=state.get("served_by")
         )
     return {"final_reply": outputs, "done": True}
+
+
+def _external_args(args: dict) -> dict:
+    return {k: v for k, v in args.items() if k not in _AGENT_ONLY_ARGS}
 
 
 # --- eviction helpers -----------------------------------------------------

@@ -12,6 +12,8 @@ dependencies = [
     "openai>=1.40",          # OpenAI-compatible client for every router provider
     "pyyaml>=6.0",           # llm/providers.yaml
     "langgraph>=0.2",        # graph/ owns control flow only — never provider calls
+    "langchain-mcp-adapters>=0.3",  # external MCP servers as tools
+    "mcp>=1.29,<2",          # PINNED: adapters 0.3.1 break on mcp 2.0 (RequestContext)
     "chromadb>=0.5",
     "sentence-transformers>=2.7",  # local bge-small-en-v1.5 embeddings (384-d)
     "streamlit>=1.30",
@@ -24,7 +26,7 @@ dev = ["pytest>=7.4", "ruff>=0.6", "pip-audit>=2.7"]
 
 [tool.setuptools]
 packages = ["agent", "graph", "llm", "memory_server", "memory_server.storage"]
-py-modules = ["config", "assembly"]
+py-modules = ["config", "assembly", "mcp_client"]
 
 [tool.setuptools.package-data]
 llm = ["providers.yaml"]

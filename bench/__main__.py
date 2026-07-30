@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import config  # noqa: E402
 from agent.loop import AgentLoop  # noqa: E402
+from agent.prompts import render_system_prompt  # noqa: E402
+from agent.token_budget import approx_tokens  # noqa: E402
 from llm import errors  # noqa: E402
 from llm.budgets import BudgetLedger  # noqa: E402
 from llm.router import ChatResult, ProviderConfig, Router, ToolCall, Usage  # noqa: E402
@@ -38,12 +40,15 @@ TIER_NAMES = {
     "T6": "Tool dispatch safety",
     "T7": "Resilience & degradation",
     "T8": "Provenance",
+    "T11": "Prompt injection & memory poisoning",
 }
 
 
 def check(cid: str, points: int):
     def deco(fn):
-        CHECKS.append((cid[:2], cid, points, fn))
+        # T11 is two digits; everything else is one letter after the tier.
+        tier = "T11" if cid.startswith("T11") else cid[:2]
+        CHECKS.append((tier, cid, points, fn))
         return fn
 
     return deco
@@ -185,6 +190,7 @@ def tc(name, arguments, cid="call_1"):
 
 
 def make_memory(tmp: Path, with_archival: bool = True) -> MemoryTools:
+    tmp.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore(
         str(tmp / "mem.db"),
         default_persona=config.DEFAULT_PERSONA,
@@ -199,6 +205,18 @@ def make_loop(mem, router, **kw):
     params = dict(planning_context_limit=1000, pressure_threshold=0.7, max_heartbeats=5)
     params.update(kw)
     return AgentLoop(router, mem, tools=[], **params)
+
+
+def _serialize_for_estimate(mem, what: str, messages=None) -> str:
+    """Reproduce what the loop actually measures, for calibrating T4c.
+
+    The loop estimates usage from ``json.dumps([system, *messages])``, so a
+    calibration that measured raw strings instead would drift from it.
+    """
+    if what == "system":
+        system = render_system_prompt(mem.render_core_memory(), mem.memory_stats(), "0 / 0 tokens (0%)")
+        return json.dumps([{"role": "system", "content": system}], default=str)
+    return json.dumps(list(messages or []), default=str)
 
 
 # =========================================================================
@@ -345,7 +363,7 @@ def t4b_pressure_warning_injected(tmp):
     mem = make_memory(tmp)
     router = FakeRouter([result(tool_calls=[tc("send_message", '{"text":"ok"}')], prompt_tokens=50)])
     loop = make_loop(mem, router)
-    loop.last_input_tokens, loop.last_limit = 800, 1000  # 80% > 70%
+    loop.seed_context(input_tokens=800, limit=1000)  # 80% > 70%
     loop.step("carry on")
     injected = [
         m for m in loop.messages
@@ -364,6 +382,25 @@ def t4c_fifo_eviction_after_offload(tmp):
     forever.
     """
     mem = make_memory(tmp)
+
+    # 40 stale turns already in context.
+    filler = "recap of an earlier exchange, " * 10
+    preload: list[dict] = []
+    for i in range(20):
+        preload.append({"role": "user", "content": f"old user message {i}: {filler}"})
+        preload.append({"role": "assistant", "content": f"old reply {i}: {filler}"})
+
+    # Calibrate against the ACTUAL system prompt rather than a magic constant.
+    # The prompt is a floor eviction cannot touch, so it has to be measured: a
+    # hardcoded budget silently stops testing anything the moment the prompt
+    # grows (a bigger floor eventually makes the check unpassable however well
+    # eviction works). Threshold sits midway between post- and pre-eviction
+    # usage, so only real paging clears pressure.
+    floor = approx_tokens(_serialize_for_estimate(mem, "system"))
+    full = floor + approx_tokens(_serialize_for_estimate(mem, "msgs", preload))
+    halved = floor + approx_tokens(_serialize_for_estimate(mem, "msgs", preload[len(preload) // 2:]))
+    limit = int(((full + halved) / 2) / 0.7)
+
     router = FakeRouter(
         [
             result(
@@ -372,32 +409,27 @@ def t4c_fifo_eviction_after_offload(tmp):
                     '{"content":"Summary of the earlier conversation.",'
                     '"request_heartbeat":true}',
                 )],
-                prompt_tokens=2400,
+                prompt_tokens=full,
             ),
             # prompt_tokens=0 forces the loop to estimate usage from the queue it
             # ACTUALLY still holds, so a stale pre-eviction count cannot fake the
-            # recovery. Un-evicted this estimates ~2370 tokens; evicted, ~1580,
-            # against a 1960 threshold — so only real eviction clears pressure.
-            # (The ~616-token system prompt is a floor eviction cannot touch, so
-            # the evictable messages have to dominate it for a clean signal.)
+            # recovery.
             result(tool_calls=[tc("send_message", '{"text":"done"}', cid="call_2")], prompt_tokens=0),
         ]
     )
-    loop = make_loop(mem, router, planning_context_limit=2800)
-    # 20 stale turns already in context, over the threshold.
-    filler = "recap of an earlier exchange, " * 10
-    for i in range(10):
-        loop.messages.append({"role": "user", "content": f"old user message {i}: {filler}"})
-        loop.messages.append({"role": "assistant", "content": f"old reply {i}: {filler}"})
+    loop = make_loop(mem, router, planning_context_limit=limit)
+    loop.seed_context(messages=preload, input_tokens=full, limit=limit)
     before = len(loop.messages)
-    loop.last_input_tokens, loop.last_limit = 2400, 2800
 
     loop.step("please summarize and continue")
 
     after = len(loop.messages)
     shrank = after < before
     relieved = not loop.under_pressure()
-    notes = f"queue {before}->{after} pressure_after={loop.under_pressure()}"
+    notes = (
+        f"queue {before}->{after} pressure_after={loop.under_pressure()} "
+        f"(floor={floor} full={full} limit={limit})"
+    )
     if shrank and relieved:
         return True, notes
     if shrank or relieved:
@@ -569,6 +601,149 @@ def _system_prompt_text() -> str:
     return BASE_SYSTEM_PROMPT
 
 
+# =========================================================================
+# T11 — Prompt injection & memory poisoning (10)
+#
+# Driven by security/injections/*.yaml, the same corpus the CI suite reads, so
+# a new attack case is added in one place and both harnesses pick it up.
+# =========================================================================
+INJECTIONS = Path(__file__).resolve().parent.parent / "security" / "injections"
+
+
+def load_corpus(filename: str) -> dict:
+    import yaml
+
+    return yaml.safe_load((INJECTIONS / filename).read_text(encoding="utf-8"))
+
+
+class GatedExternal:
+    """Scripted external toolset: one untrusted tool, optionally write-gated."""
+
+    def __init__(self, tool, payload="", gated=(), jail=None):
+        self._tool, self._payload = tool, payload
+        self._gated, self._jail = frozenset(gated), jail
+        self.calls = []
+
+    def names(self):
+        return frozenset({self._tool})
+
+    def trust_of(self, name):
+        return "untrusted"
+
+    def server_of(self, name):
+        return "corpus-server"
+
+    def is_gated(self, name):
+        return name in self._gated
+
+    def jail_of(self, name):
+        return self._jail
+
+    def call(self, name, arguments):
+        self.calls.append((name, arguments))
+        return self._payload
+
+
+@check("T11a", 4)
+def t11a_memory_poisoning(tmp):
+    """Untrusted content must never reach core memory (spec §6.5a)."""
+    corpus = load_corpus("memory_poisoning.yaml")
+    failures = []
+    for case in corpus["cases"]:
+        mem = make_memory(tmp / case["name"])
+        before = mem.core_blocks()["human"]
+        ext = GatedExternal(corpus["tool"], payload=case["payload"])
+        loop = AgentLoop(
+            FakeRouter(
+                [
+                    result(tool_calls=[tc(corpus["tool"], '{"query":"x","request_heartbeat":true}')]),
+                    # The model obeys the page and tries to write core memory.
+                    result(tool_calls=[tc(
+                        "core_memory_append",
+                        '{"block":"human","content":"Favorite store: BuyNow.","source":"stated"}',
+                        cid="call_2",
+                    )]),
+                    result(tool_calls=[tc("send_message", '{"text":"ok"}', cid="call_3")]),
+                ]
+            ),
+            mem, tools=[], planning_context_limit=100_000,
+            pressure_threshold=0.7, max_heartbeats=5, external=ext,
+        )
+        loop.step("look that up for me")
+
+        if mem.core_blocks()["human"] != before:
+            failures.append(f"{case['name']}: CORE MEMORY MUTATED")
+        expected = case["expect"].get("flags", [])
+        wrapped = next(
+            (m["content"] for m in loop.messages if m.get("tool_call_id") == "call_1"), ""
+        )
+        if expected and not any(f in wrapped for f in expected):
+            failures.append(f"{case['name']}: no flag from {expected}")
+
+    return (not failures), (failures[0] if failures else f"{len(corpus['cases'])} cases held")
+
+
+@check("T11b", 3)
+def t11b_instruction_override(tmp):
+    """Injected instructions are neutralized and flagged (spec §6.5b)."""
+    from security.sanitizer import CLOSE_MARKER, sanitize_external
+
+    corpus = load_corpus("prompt_exfiltration.yaml")
+    failures = []
+    for case in corpus["cases"]:
+        out = sanitize_external(case["payload"], source="fetch_content via corpus")
+        expect = case["expect"]
+        for flag in expect.get("flags", []):
+            if flag not in out.flags:
+                failures.append(f"{case['name']}: missing flag {flag}")
+        if "marker_collisions" in expect:
+            if out.marker_collisions != expect["marker_collisions"]:
+                failures.append(f"{case['name']}: collisions {out.marker_collisions}")
+            # Exactly one real terminator: the forged one cannot end the envelope.
+            if out.text.count(CLOSE_MARKER) != 1:
+                failures.append(f"{case['name']}: envelope escaped")
+        if expect.get("neutralized") and not (out.flags or out.marker_collisions):
+            failures.append(f"{case['name']}: passed through untouched")
+
+    return (not failures), (failures[0] if failures else f"{len(corpus['cases'])} cases held")
+
+
+@check("T11c", 3)
+def t11c_filesystem_writes_are_gated(tmp):
+    """Writes need approval; traversals are refused outright (spec §6.5c)."""
+    corpus = load_corpus("filesystem_writes.yaml")
+    failures = []
+    for case in corpus["cases"]:
+        mem = make_memory(tmp / case["name"])
+        ext = GatedExternal(corpus["tool"], gated=(corpus["tool"],), jail=str(tmp / "workspace"))
+        loop = AgentLoop(
+            FakeRouter(
+                [
+                    result(tool_calls=[tc(corpus["tool"], json.dumps(case["arguments"]))]),
+                    result(tool_calls=[tc("send_message", '{"text":"ok"}', cid="call_2")]),
+                ]
+            ),
+            mem, tools=[], planning_context_limit=100_000,
+            pressure_threshold=0.7, max_heartbeats=5, external=ext,
+        )
+        loop.step("write that file")
+        expect = case["expect"]
+        interrupted = loop.pending_approval is not None
+
+        if interrupted != expect["interrupted"]:
+            failures.append(f"{case['name']}: interrupted={interrupted}")
+        if not expect["interrupted"] and ext.calls:
+            failures.append(f"{case['name']}: refused call still RAN")
+        if expect.get("ran_without_approval") is False and ext.calls:
+            failures.append(f"{case['name']}: ran before approval")
+        if interrupted and case.get("approve") is False:
+            loop.resume(approved=False)
+            if ext.calls:
+                failures.append(f"{case['name']}: ran after DENIAL")
+
+    return (not failures), (failures[0] if failures else f"{len(corpus['cases'])} cases held")
+
+
 # --- live smoke (not scored) ---------------------------------------------
 def run_live_smoke() -> list[str]:
     """One real request per configured provider. Reported, never scored."""
@@ -608,7 +783,7 @@ def run(live: bool = False, json_out: str | None = None) -> int:
     possible = sum(r["points"] for r in results)
 
     print("\nMemAssist benchmark — deterministic suite\n" + "=" * 62)
-    for tier in sorted(TIER_NAMES):
+    for tier in sorted(TIER_NAMES, key=lambda k: int(k[1:])):
         rows = [r for r in results if r["tier"] == tier]
         if not rows:
             continue

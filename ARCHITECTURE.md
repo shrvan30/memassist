@@ -1,7 +1,7 @@
 # ARCHITECTURE — MemAssist (as-built)
 
-This document describes MemAssist **as the code actually is** at the end of the
-Phase 1.5 fix sprint (deterministic bench 100/100). It is a developer map: the
+This document describes MemAssist **as the code actually is** at the end of
+Phase 3 (deterministic bench 110/110). It is a developer map: the
 file layout, the data flows through one turn, and the failure-handling designs —
 in particular the Gemini `ProviderPermanentError` fix.
 
@@ -19,10 +19,22 @@ memassist/
   assembly.py             Composition root — build_memory / build_router / build_loop
   conftest.py             Puts repo root on sys.path for tests
 
-  agent/                  LLM-facing loop. Imports NO storage and NO provider SDK.
-    loop.py               AgentLoop: turn cycle, tool dispatch, pressure + FIFO eviction
-    prompts.py            System-prompt assembly (identity, tiers, provenance, pressure)
+  agent/                  Thin adapter + prompt/budget helpers. No storage, no SDK.
+    loop.py               AgentLoop: step()/resume(), state views over the checkpoint
+    prompts.py            System-prompt assembly (tiers, provenance, untrusted rule)
     token_budget.py       Pure context-usage math (approx_tokens, is_under_pressure, …)
+
+  graph/                  LangGraph owns CONTROL FLOW only (spec §4).
+    state.py              AgentState (turn state) + Deps (router/memory/limits/allowlist)
+    nodes.py              The 8 nodes: build_prompt … security_gate … respond
+    graph.py              StateGraph wiring, pressure edge, heartbeat cycle, recursion cap
+
+  security/               The AI security layer (spec §6).
+    sanitizer.py          Untrusted results -> marked data; 7 injection patterns
+    guards.py             Core-memory lockout, source=external, allowlist, path jail
+    injections/*.yaml     T11 red-team corpus — read by BOTH bench and CI
+
+  mcp_client.py           External MCP servers from mcp_servers.yaml; trust zones
 
   llm/                    The failover router. The ONLY place a provider is called.
     router.py             Router.chat(): priority chain, cooldowns, disable, served_by
@@ -33,7 +45,7 @@ memassist/
   memory_server/          Memory tiers + the six tools (the MemoryInterface impl).
     memory_tools.py       MemoryTools: the six tools, validated dispatch, provenance
     schemas.py            Pydantic input models ↔ flat OpenAI function schemas
-    __main__.py           Phase 2 FastMCP entry point (stub)
+    __main__.py           FastMCP server (stdio): the 6 tools, for Claude Code
     storage/
       sqlite.py           core_blocks + messages (recall); date-bound validation
       chroma.py           ArchivalStore: persistent Chroma, cosine, source metadata
@@ -42,8 +54,9 @@ memassist/
 
   app/streamlit_app.py    Phase 1 chat UI: live memory sidebar + provider badge
 
-  bench/                  Deterministic, offline benchmark (100 pts). `python -m bench`
-  tests/                  pytest suite (60 tests, no API keys, no provider calls)
+  bench/                  Deterministic, offline benchmark (110 pts). `python -m bench`
+  tests/                  pytest suite (120 tests, no API keys, no provider calls)
+  workspace/              The filesystem server's jail — nothing else is reachable
 
   Makefile  pyproject.toml  requirements.txt  ci.yml
   .mcp.json  mcp_servers.yaml   MCP registration (server is Phase 2)
@@ -56,7 +69,8 @@ The loop depends on nothing concrete. It talks to exactly two interfaces:
 | Protocol | Methods | Concrete impl | Swapped by |
 |---|---|---|---|
 | `LLMRouter` | `chat`, `context_window`, `min_context_window` | `llm.router.Router` | (stable) |
-| `MemoryInterface` | `render_core_memory`, `memory_stats`, `dispatch`, `record_event` | `memory_server.memory_tools.MemoryTools` | Phase 2 → MCP client |
+| `MemoryInterface` | `render_core_memory`, `memory_stats`, `dispatch`, `record_event` | `memory_server.memory_tools.MemoryTools` | (stable) |
+| `ExternalToolset` | `names`, `trust_of`, `is_gated`, `jail_of`, `call` | `mcp_client.ExternalTools` | Phase 4 → HTTP transport |
 
 Because the loop sees only these, later phases are local changes: Phase 2 swaps
 the `MemoryInterface` implementation for an MCP client; Phase 3 swaps SQLite for
@@ -71,33 +85,34 @@ Postgres beneath it. Neither edits `agent/loop.py`.
 
 Entry point: `AgentLoop.step(user_text) -> list[str]` (the strings sent to the
 user via `send_message`). The Streamlit app and the benchmark both drive this
-same method.
+same method. Since Phase 2 the steps below are graph **nodes** (§10), not inline
+loop code, but the sequence is unchanged.
 
 ```
 user_text
-   │  record ("user","message") to recall; append to FIFO self.messages
-   │  if under_pressure(): inject "[MEMORY PRESSURE] …" + record pressure_warning
+   │  record ("user","message") to recall; append to the FIFO in graph state
    ▼
-┌─ heartbeat loop (cap = max_heartbeats, default 5) ───────────────────────────┐
-│  system = BASE_SYSTEM_PROMPT + rendered core memory + memory stats + usage%   │
-│  result = router.chat([system, *self.messages], tools=ALL_TOOLS)              │
-│     └─ on errors.AllProvidersExhausted → return PROVIDERS_EXHAUSTED_MESSAGE    │
-│  self.served_by = result.served_by ; update last_input_tokens / last_limit    │
-│  append assistant message (content + tool_calls) to FIFO                       │
+┌─ heartbeat cycle (cap = max_heartbeats, default 5) ──────────────────────────┐
+│  build_prompt    system = BASE_SYSTEM_PROMPT + core memory + stats + usage%   │
+│  pressure_check  first pass and >= threshold? -> inject_warning               │
+│  call_llm        router.chat([system, *messages], tools)                      │
+│     └─ on errors.AllProvidersExhausted -> PROVIDERS_EXHAUSTED_MESSAGE          │
+│                  served_by / input_tokens / limit updated; assistant appended  │
 │                                                                                │
-│  for each tool_call:                                                           │
-│     send_message        → collect text as output; record ("assistant",…)       │
-│     memory tool         → text = memory.dispatch(name, args); append tool msg  │
-│        └─ archival_memory_insert while under pressure → set `offloaded` flag   │
-│                                                                                │
-│  if offloaded: _evict_offloaded()   # the paging half of MemGPT (see §5)       │
+│  security_gate   per tool_call: allowlist, core-memory lockout, source=        │
+│                  external, path jail; interrupt() for write-gated tools        │
+│  dispatch_tools  send_message  -> collect output; record ("assistant",…)       │
+│                  memory tool   -> memory.dispatch(name, args)                  │
+│                  external tool -> external.call(...); VERBATIM result to recall │
+│                     └─ archival_memory_insert under pressure -> evict (§4)      │
+│  sanitize_results untrusted results rewritten as marked data; saw_untrusted    │
 │                                                                                │
 │  stop when: a message was sent and no heartbeat requested, OR cap hit,         │
 │             OR the model produced plain text with no tool call (surfaced)      │
 └───────────────────────────────────────────────────────────────────────────────┘
    │
    ▼  every event (user / assistant / tool_call / tool_result / pressure_warning /
-      eviction) is persisted to the recall log, tagged with served_by.
+      eviction / security) is persisted to the recall log, tagged with served_by.
 outputs
 ```
 
@@ -290,16 +305,21 @@ signed-hashing embedder is retained as an injectable zero-dependency fallback.
 
 ## 8. Verification
 
-- **`make test`** → pytest, 60 tests, no API keys and no provider calls. The
-  archival tests exercise the real local bge-small embedder (cached after a
-  one-time download), so a cold run pays that load once.
-- **`make bench`** → the deterministic 100-point suite in `bench/` (every
+- **`make test`** → pytest, 120 tests, no API keys, no provider calls and no
+  MCP subprocesses. Unit tests inject the hashing embedder as a test double, so
+  CI needs no bge-small download; the benchmark keeps the real model, which is
+  what T5 measures.
+- **`make bench`** → the deterministic 110-point suite in `bench/` (every
   provider call is a scripted fake; every check gets a fresh temp SQLite +
   Chroma). Reproducible, so a score delta is attributable to a source change.
 - **`make bench LIVE=1`** → adds one real request per configured provider,
   reported but **never scored**, so CI stays deterministic.
+- **CI** (`.github/workflows/ci.yml`): ruff → pytest → gitleaks → pip-audit.
+  The audit ignores PYSEC-2026-311 (chromadb): the RCE needs the `/api/v2` HTTP
+  endpoint with `trust_remote_code`, and Chroma runs embedded here with no
+  server. No fixed release exists, so without the ignore the gate can never pass.
 
-Current: **bench 100/100**, pytest green.
+Current: **bench 110/110** (T1–T8 100, T11 10), pytest green, CI green.
 
 ---
 
@@ -309,6 +329,123 @@ Current: **bench 100/100**, pytest green.
   fragment the vector space.
 - `ProviderPermanentError` disables-and-fails-over rather than raising immediately
   (see §6).
-- **Phase 2+ (not built):** the FastMCP server (`memory_server/__main__.py` is a
-  stub), the async MCP client bridge, Postgres/pgvector, FastAPI/Next.js, and
-  Langfuse tracing. The `MemoryInterface` seam is what keeps those additive.
+- **`memgpt-memory` is dispatched in-process**, not over its own stdio server.
+  It is `trust=internal` by definition, so a subprocess hop buys no isolation
+  while adding latency and non-determinism to the benchmark. The stdio server is
+  real and registered in `.mcp.json` — it exists for external clients.
+- **`mcp` is pinned `<2`**: `langchain-mcp-adapters` 0.3.1 imports
+  `RequestContext` from `mcp.shared.context`, which mcp 2.0 removed.
+- **Schema budget.** The filesystem server alone exports 14 tools, so 16
+  external schemas now ride in every prompt. Spec §5.1 caps active servers at 3
+  for exactly this reason; trimming to the tools actually used is the obvious
+  next economy.
+- **Phase 4+ (not built):** Postgres/pgvector, FastAPI/Next.js, MCP over
+  Streamable HTTP, and Langfuse tracing. The `MemoryInterface` and
+  `ExternalToolset` seams are what keep those additive.
+
+---
+
+## 10. Phase 2 — LangGraph (the turn cycle moved)
+
+`AgentLoop` used to *be* the turn cycle. It is now a 93-line adapter: `step()`
+seeds graph state, invokes, returns. The cycle lives in `graph/nodes.py`.
+
+```
+START -> build_prompt -> pressure_check --(>=threshold)-> inject_warning --+
+             ^              |(under)                                       |
+             |              v                                              |
+             |           call_llm <----------------------------------------+
+             |              |
+             |    +- tool calls? --- no --> respond -> END
+             |    v yes
+             |  security_gate -> dispatch_tools -> sanitize_results
+             |                                        |
+             +---- heartbeat < cap and not done? ------+
+```
+
+Two deliberate deviations from the spec diagram:
+
+- **The cycle re-enters at `build_prompt`, not `call_llm`.** A
+  `core_memory_append` in round 1 has to reach the model in round 2, which means
+  re-rendering the prompt. `pressure_check` guards on `heartbeat_count == 0`, so
+  the warning still fires exactly once per turn.
+- **`recursion_limit` is computed from `max_heartbeats`** (48 at the default).
+  The counter in `dispatch_tools` enforces policy; the limit is the backstop for
+  a routing bug the counter cannot see. LangGraph's default of 25 would trip at
+  about 4 heartbeats.
+
+### Turn state lives in a checkpointer
+
+`InMemorySaver`, keyed by a per-instance thread id. `loop.messages`,
+`last_input_tokens`, `last_limit` and `served_by` are **views** over the current
+checkpoint; writing goes through `reset()` (rotates the thread, dropping
+accumulated checkpoints) or `seed_context()`. Assigning to `loop.messages` would
+mutate a throwaway copy, which is why the mutators are explicit.
+
+This exists for `interrupt()`: suspending a turn and resuming it later only
+works if the state it resumes into was persisted.
+
+---
+
+## 11. Phase 3 — external tools and the security layer
+
+### Trust zones (spec 6.1)
+
+`mcp_servers.yaml` is the authority. `trust_of(tool)` resolves through the
+owning server, and tools are fetched **per server** so every tool's owner — and
+therefore its trust zone — is known rather than guessed.
+
+| Server | Transport | Trust | Notes |
+|---|---|---|---|
+| `memgpt-memory` | in-process | internal | Same `MemoryTools` the stdio server wraps. A subprocess hop would add latency and non-determinism for no isolation benefit. |
+| `ddg-search` | `uvx duckduckgo-mcp-server` | **untrusted** | `search`, `fetch_content` |
+| `filesystem` | `npx @modelcontextprotocol/server-filesystem ./workspace` | **untrusted** | 14 tools, 4 write-gated |
+
+MCP schemas are flattened to scalar-only properties before reaching the router —
+nested objects and `$ref` are the most reliable way to break tool calling on one
+provider but not another. A tool-name collision across servers **raises**: an
+ambiguous owner is an ambiguous trust decision.
+
+### The two seams
+
+**`sanitize_results` -> `security/sanitizer.py` (spec 6.2).** Every untrusted
+result is, in this order: marker-escaped (on RAW input), pattern-neutralized,
+length-capped, then wrapped in `<untrusted_content>` with a header restating the
+rule. The system prompt's UNTRUSTED CONTENT section is what makes the markers
+mean something.
+
+The verbatim original goes to recall memory in `dispatch_tools`, *before*
+sanitizing — the audit trail reads what actually arrived, the model only ever
+sees the sanitized copy (the next `call_llm` runs strictly after this node).
+
+**`security_gate` -> `security/guards.py` (spec 6.3).** Runs before anything
+executes:
+
+1. **Deny by default** on the node allowlist (declared schemas + external names
+   + the built-in contract).
+2. **Core memory closed** once `saw_untrusted` latches for the turn. It does not
+   try to judge whether a given call "looks related" — by the time the model is
+   choosing tools it has already read the content.
+3. **Archival forced to `source='external'`**, so origin travels with the
+   passage. A model-supplied `source='stated'` is overridden.
+4. **Path jail** re-checked on this side of the subprocess boundary, across
+   every path-carrying argument (`path`, `source`, `destination`, `paths`).
+5. **`interrupt()`** for write-gated tools.
+
+Order is load-bearing twice: marker-stripping runs before pattern flagging, and
+the jail check runs before the approval gate — a traversal is refused outright,
+never offered to a human who might wave it through.
+
+The node is split around `interrupt()`: pure evaluation above it (that code
+re-runs on resume), every side effect below it, so audit events are written once.
+
+### Human-in-the-loop
+
+`step()` returns normally with an empty reply while suspended;
+`loop.pending_approval` carries the request and `loop.resume(approved)` finishes
+the turn. Streamlit renders the exact arguments with Approve/Deny, and a
+suspended turn owns the UI until answered. A denial returns text telling the
+model not to retry or route around it.
+
+Verified live against the real filesystem server: the file does not exist before
+approval and does after.

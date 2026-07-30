@@ -52,6 +52,13 @@ SEARCH_PAGE_SIZE: int = int(os.getenv("MEMASSIST_SEARCH_PAGE_SIZE", "5"))
 # back to the model (defensive: results are treated as untrusted text).
 TOOL_RESULT_CHAR_CAP: int = int(os.getenv("MEMASSIST_TOOL_RESULT_CHAR_CAP", "4000"))
 
+# --- External MCP tools (spec §5) ----------------------------------------
+# The registry of external servers. Set MEMASSIST_EXTERNAL_TOOLS=0 to run with
+# memory tools only (no subprocesses) — the benchmark and tests do exactly that
+# by never passing an ExternalTools instance.
+MCP_SERVERS_YAML: str = os.getenv("MEMASSIST_MCP_SERVERS_YAML", str(ROOT / "mcp_servers.yaml"))
+EXTERNAL_TOOLS: bool = os.getenv("MEMASSIST_EXTERNAL_TOOLS", "1") not in ("0", "false", "False")
+
 # --- Storage locations ---------------------------------------------------
 DB_PATH: str = os.getenv("MEMASSIST_DB_PATH", str(ROOT / "data" / "memassist.db"))
 CHROMA_PATH: str = os.getenv("MEMASSIST_CHROMA_PATH", str(ROOT / "data" / "chroma"))
