@@ -25,6 +25,11 @@ servers:
     args: ["duckduckgo-mcp-server"]
     trust: untrusted          # web content = hostile until sanitized
     enabled: true
+    # `tools:` is a load-time allowlist. Every schema listed here rides in EVERY
+    # prompt on EVERY turn, so the registry — not the server — decides what the
+    # context budget is spent on. Omit the key to load everything a server
+    # exports. Unknown names are still denied by security/guards.py either way.
+    tools: [search, fetch_content]
     # optional upgrade: swap for Tavily MCP when TAVILY_API_KEY is set
 
   filesystem:
@@ -38,11 +43,19 @@ servers:
     # confinement does not rest on a third party staying correct.
     jail: ./workspace
     write_gate: true          # every write requires human_interrupt approval
-    # Listed explicitly rather than inferred: this server exports 14 tools and
-    # guessing which ones mutate the disk is the guess that ends with a file
-    # overwritten. Omit the list and write_gate gates ALL of them.
+    # 14 exported, 4 loaded. The other ten (directory_tree, get_file_info,
+    # read_media_file, read_multiple_files, search_files, move_file,
+    # create_directory, list_directory_with_sizes, list_allowed_directories,
+    # read_file) were costing schema tokens on every turn for capability the
+    # assistant never reaches for. Add one back the day something needs it.
+    tools:
+      - read_text_file
+      - list_directory
+      - write_file
+      - edit_file
+    # Listed explicitly rather than inferred: guessing which of a stranger's
+    # tools mutate the disk is the guess that ends with a file overwritten.
+    # Omit this list and write_gate gates ALL loaded tools.
     gated_tools:
       - write_file
       - edit_file
-      - create_directory
-      - move_file
