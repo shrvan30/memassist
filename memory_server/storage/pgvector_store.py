@@ -16,6 +16,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Callable
 
+from security.sensitivity import is_sensitive
+
 from . import embedder
 from .postgres import connect
 
@@ -60,13 +62,31 @@ class PgVectorStore:
             self._conn.execute(_SCHEMA)
         register_vector(self._conn)
 
-    def insert(self, content: str, source: str = "agent", created_at: str | None = None) -> str:
+    def insert(
+        self,
+        content: str,
+        source: str = "agent",
+        created_at: str | None = None,
+        sensitive: bool | None = None,
+    ) -> str:
+        """See ``ArchivalStore.insert`` — ``sensitive=None`` detects, and is the
+        default so a caller that forgets the flag fails closed."""
         passage_id = uuid.uuid4().hex
+        if sensitive is None:
+            sensitive = is_sensitive(content)
         with self._lock:
             self._conn.execute(
-                f"INSERT INTO {self._table} (id, content, embedding, source, created_at) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (passage_id, content, self._embed(content), source, created_at or _utc_now()),
+                f"INSERT INTO {self._table} "
+                "(id, content, embedding, source, sensitive, created_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    passage_id,
+                    content,
+                    self._embed(content),
+                    source,
+                    bool(sensitive),
+                    created_at or _utc_now(),
+                ),
             )
         return passage_id
 
@@ -80,7 +100,8 @@ class PgVectorStore:
         if total == 0:
             return [], 0
         rows = self._conn.execute(
-            f"SELECT id, content, source, created_at, embedding <=> %s::vector AS distance "
+            f"SELECT id, content, source, sensitive, created_at, "
+            f"embedding <=> %s::vector AS distance "
             f"FROM {self._table} ORDER BY distance, id LIMIT %s OFFSET %s",
             (self._embed(query), top_k, page * top_k),
         ).fetchall()
@@ -90,6 +111,7 @@ class PgVectorStore:
                 "content": r["content"],
                 "created_at": r["created_at"],
                 "source": r["source"],
+                "sensitive": bool(r["sensitive"]),
                 "distance": float(r["distance"]),
             }
             for r in rows
