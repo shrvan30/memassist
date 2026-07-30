@@ -141,3 +141,31 @@ def test_flatten_unwraps_optional_anyof():
         }
     )
     assert flat["properties"]["backend"] == {"type": "string"}
+
+
+# --- tool allowlist (schema economy) --------------------------------------
+def test_tools_allowlist_filters_at_load(tmp_path):
+    registry = REGISTRY.replace(
+        '    enabled: true\n', '    enabled: true\n    tools: [search]\n'
+    )
+    ext = ExternalTools(load_registry(write_registry(tmp_path, registry)))
+    for name in ("search", "fetch_content"):
+        tool = fake_tool(name)
+        if name in (ext._specs["ddg-search"].get("tools") or [name]):
+            ext._register("ddg-search", tool)
+
+    assert ext.names() == frozenset({"search"})
+
+
+def test_registry_allowlists_are_a_subset_of_what_servers_export():
+    """gated_tools must name tools that are actually loaded, or they gate nothing."""
+    import yaml
+
+    from mcp_client import DEFAULT_REGISTRY
+
+    servers = yaml.safe_load(DEFAULT_REGISTRY.read_text(encoding="utf-8"))["servers"]
+    for name, spec in servers.items():
+        allow, gated = spec.get("tools"), spec.get("gated_tools")
+        if allow and gated:
+            orphans = set(gated) - set(allow)
+            assert not orphans, f"{name}: gated but not loaded: {sorted(orphans)}"

@@ -94,15 +94,35 @@ class ExternalTools:
         # Per server, not one aggregate call: a server that will not start then
         # costs only its own tools, and each tool's owner (and therefore its
         # trust zone) is known without having to guess.
-        for name in self._specs:
+        for name, spec in self._specs.items():
             try:
                 tools = self._run(self._client.get_tools(server_name=name))
             except Exception as exc:  # command not found, crash on boot, timeout…
                 self.errors[name] = f"{type(exc).__name__}: {exc}"
                 _log.warning("MCP server '%s' unavailable: %s", name, exc)
                 continue
+            wanted = spec.get("tools")
+            kept = 0
             for tool in tools:
+                # Every schema rides in EVERY prompt, on every turn, forever.
+                # An allowlist is the only thing that stops a server's whole
+                # surface from becoming a permanent context tax (spec §5.1).
+                if wanted is not None and tool.name not in wanted:
+                    continue
                 self._register(name, tool)
+                kept += 1
+            if wanted is not None:
+                missing = set(wanted) - self.names()
+                if missing:
+                    # The allowlist names a tool the server does not export —
+                    # a typo or a version drift. Say so; silently loading fewer
+                    # tools than configured is how capability vanishes quietly.
+                    _log.warning(
+                        "MCP server '%s': allowlisted tools not exported: %s",
+                        name,
+                        ", ".join(sorted(missing)),
+                    )
+                _log.info("MCP server '%s': kept %d of %d tools", name, kept, len(tools))
         _log.info("External MCP tools loaded: %s", ", ".join(sorted(self._trust)) or "none")
         return self
 
