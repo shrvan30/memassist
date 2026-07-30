@@ -5,8 +5,11 @@ langgraph>=0.2        # graph/ owns control flow only — never provider calls
 langchain-mcp-adapters>=0.3   # external MCP servers as tools (mcp_servers.yaml)
 mcp>=1.29,<2          # PINNED: adapters 0.3.1 import RequestContext, dropped in mcp 2.0
 chromadb>=0.5
+psycopg[binary]>=3.1  # Postgres driver (Phase 4 backend)
+pgvector>=0.2         # vector(384) type adapter for psycopg
 sentence-transformers>=2.7  # local bge-small-en-v1.5 embeddings (384-d), no API key
-streamlit>=1.30
+fastapi>=0.110         # api/ service (SSE)
+uvicorn[standard]>=0.27
 pydantic>=2.5
 python-dotenv>=1.0
 
