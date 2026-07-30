@@ -1,8 +1,13 @@
-"""FastMCP server exposing the six memory tools over stdio (spec §7).
+"""FastMCP server exposing the six memory tools (spec §7).
 
-``python -m memory_server`` — registered in ``.mcp.json`` so Claude Code and
-Claude Desktop can drive the same core/recall/archival memory the assistant
-uses.
+    python -m memory_server                     stdio  (Claude Code/Desktop)
+    python -m memory_server --http              Streamable HTTP on :8090
+
+stdio is right for a desktop client that owns the subprocess; HTTP is right
+for docker-compose, where the memory server is its own service with its own
+lifecycle and healthcheck and several clients may reach it. Same six tools,
+same handlers — only the transport differs, which is exactly what the MCP
+transport split is for.
 
 ``send_message`` is deliberately absent: it is the agent's channel to its own
 user, not a memory operation, and it means nothing to an external client.
@@ -14,6 +19,7 @@ drift.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -104,8 +110,35 @@ def archival_memory_search(query: str, top_k: int = 5, page: int = 0) -> str:
     )
 
 
-def main() -> None:
-    mcp.run(transport="stdio")
+@mcp.custom_route("/healthz", methods=["GET"])
+async def healthz(_request):
+    """Liveness for docker-compose. Deliberately does NOT open storage —
+    a health probe that touches the database turns a slow query into a
+    restart loop."""
+    from starlette.responses import JSONResponse
+
+    return JSONResponse({"status": "ok", "transport": "http"})
+
+
+def main(argv: list[str] | None = None) -> None:
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="memory_server")
+    ap.add_argument(
+        "--http",
+        action="store_true",
+        help="serve Streamable HTTP instead of stdio (used by docker-compose)",
+    )
+    ap.add_argument("--host", default=os.getenv("MEMASSIST_MCP_HOST", "0.0.0.0"))
+    ap.add_argument("--port", type=int, default=int(os.getenv("MEMASSIST_MCP_PORT", "8090")))
+    args = ap.parse_args(argv)
+
+    if args.http:
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="streamable-http")
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

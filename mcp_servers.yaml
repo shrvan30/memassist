@@ -18,6 +18,12 @@ servers:
     command: python
     args: ["-m", "memory_server"]
     trust: internal
+    # In docker-compose the memory server is its own service, so swap the two
+    # lines above for the transport it serves there:
+    #   transport: streamable_http
+    #   url: ${MEMASSIST_MCP_URL:-http://memory-mcp:8090/mcp}
+    # $VARS in `url` and `args` are expanded from the environment, so a compose
+    # file can point at a service name without the registry hardcoding one.
 
   ddg-search:
     transport: stdio
