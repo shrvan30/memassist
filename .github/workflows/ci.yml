@@ -23,7 +23,9 @@ jobs:
 
       - name: Secret scan
         uses: gitleaks/gitleaks-action@v2
-        env: { GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+        # Quoted: in a YAML flow mapping the `{` of `${{ }}` is a flow indicator,
+        # so bare it is a parse error and the whole workflow fails at startup.
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
 
       - name: Dependency audit
         # PYSEC-2026-311: chromadb RCE via trust_remote_code on the /api/v2 HTTP
