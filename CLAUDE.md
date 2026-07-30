@@ -6,7 +6,8 @@ A personal AI assistant implementing the MemGPT architecture (Packer et al.,
 own memory via tool calls, paging between context ("RAM") and storage ("disk").
 Runs at $0/month on 4 free-tier providers behind a failover router. Orchestrated
 by LangGraph; uses external MCP servers as tools behind a security layer.
-STATUS: Phase 1 built and benchmarked 79/100 (see BENCHMARKS.md).
+STATUS: Phases 1-3 built. Bench **110/110** (T1-T8 100 + T11 security 10);
+CI green. Next: Phase 4 (see BENCHMARKS.md).
 
 ## Read first
 - `PROJECT_SPEC.md` — architecture, tools, LangGraph design, security, CI/CD,
@@ -26,9 +27,12 @@ Ponytail active: prefer smallest diffs, but the spec's architectural boundaries 
   3.3 70B → OpenRouter free → Mistral Small. OpenAI-compatible via `openai`
   SDK + per-provider base_url. ALL calls through `llm/router.py`; LangGraph
   nodes call the router — never a provider SDK, never LangChain model classes.
-- **Tools:** own memory MCP server (trusted) + external MCP servers
-  (UNTRUSTED: DuckDuckGo search, filesystem) via langchain-mcp-adapters.
-  Registry in `mcp_servers.yaml`. Max 3 active servers.
+- **Tools:** own memory MCP server (trust=internal, dispatched IN-PROCESS —
+  the stdio server exists for Claude Code via `.mcp.json`) + external MCP
+  servers (UNTRUSTED: `uvx duckduckgo-mcp-server`, `npx
+  @modelcontextprotocol/server-filesystem`) via langchain-mcp-adapters.
+  Registry in `mcp_servers.yaml`. NOTE: `mcp` is pinned `<2` — adapters
+  0.3.1 imports `RequestContext`, which mcp 2.0 removed.
 - **Security:** every external tool result passes `security/sanitizer.py`;
   memory writes pass `security/guards.py`. See spec §6. Non-negotiable.
 - **Embeddings: LOCAL ONLY** — sentence-transformers bge-small-en-v1.5 (384-d).
@@ -67,8 +71,11 @@ summarized messages from FIFO (Phase 1.5 fix).
 - Small commits; one phase = one branch; CI green before merge.
 
 ## Commands
-- `make dev` (Streamlit) · `make test` (pytest) · `make bench` (benchmark
-  harness) · `make lint` (ruff) · `docker compose up` (Phase 4)
+- `make dev` (Streamlit) · `make test` (pytest, 120) · `make bench` (110 pts)
+  · `make mcp` (FastMCP memory server, stdio) · `docker compose up` (Phase 4)
+- Lint/audit as CI runs them: `ruff check .` · `pip-audit -r requirements.txt
+  --ignore-vuln PYSEC-2026-311` (chromadb: server-only RCE, no fix released,
+  we run it embedded)
 
 ## Status checklist
 - [x] Phase 1: core loop, router, tiers, Streamlit — benchmarked 79/100
@@ -84,10 +91,23 @@ summarized messages from FIFO (Phase 1.5 fix).
   - [x] bge-small-en-v1.5 384-d embedder + one-time re-embed migration
   - [x] Friendly provider-exhaustion copy
   - [x] Provenance tags (`stated` | `inferred`) on human block + archival
-  - [ ] Known gap, deferred: `conversation_search_date` silently accepts
-        malformed dates (bench T3b) — pre-existing, outside sprint scope
-- [ ] Phase 2: LangGraph refactor (same step() API) + minimal CI live +
-      re-run benchmark = no regression
-- [ ] Phase 3: external MCP tools + security layer + injection test suite (T11)
+  - [x] `conversation_search_date` date validation (T3b) — 96 → **100/100**
+- [x] Phase 2: LangGraph refactor — `graph/` owns control flow, `agent/loop.py`
+      is a 93-line adapter with an unchanged `step()`. CI actually runs now
+      (the committed workflow had a YAML parse error and had never executed).
+      Bench **100/100**, no tier moved.
+- [x] Phase 3: external MCP tools + real security layer + T11 (**110/110**)
+  - [x] Checkpointer + explicit state API (`reset`, `seed_context`) — the
+        pre-req for interrupts; attributes are now views over the checkpoint
+  - [x] FastMCP memory server is REAL (`python -m memory_server`, 6 tools);
+        `mcp_client.py` loads ddg-search + filesystem via MultiServerMCPClient
+  - [x] `security/sanitizer.py` — markers, 7 injection patterns, escape
+        defusal, length-cap, verbatim original to recall for audit
+  - [x] `security/guards.py` — core memory closed once untrusted content is
+        in the turn; archival forced to `source=external`; deny-by-default
+  - [x] Filesystem jailed to `./workspace`; every write behind a LangGraph
+        interrupt with Streamlit approve/deny
+  - [x] T11 corpus in `security/injections/*.yaml`, read by BOTH the bench
+        tier and CI (`tests/test_injections.py`)
 - [ ] Phase 4: Postgres/pgvector, FastAPI, Next.js, Docker
 - [ ] Phase 5: CD deploy, Mistral consolidation lane (T10), Langfuse
