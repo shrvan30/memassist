@@ -10,7 +10,7 @@ import pytest
 
 from llm import errors
 from llm.budgets import BudgetLedger
-from llm.router import ProviderConfig, Router, ToolCall, load_providers
+from llm.router import ProviderConfig, Router, ToolCall, load_providers, resolve_api_key
 
 
 # --- helpers --------------------------------------------------------------
@@ -230,6 +230,27 @@ def test_missing_api_key_skips_provider():
 
     assert res.served_by == "groq"
     assert gemini.calls == 0
+
+
+# --- api key resolution ---------------------------------------------------
+def test_gemini_key_prefers_canonical_name(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "new")
+    monkeypatch.setenv("GOOGLE_API_KEY", "old")
+    assert resolve_api_key("GEMINI_API_KEY") == "new"
+
+
+def test_legacy_google_key_still_works_and_warns(monkeypatch, caplog):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "old")
+    with caplog.at_level("WARNING"):
+        assert resolve_api_key("GEMINI_API_KEY") == "old"
+    assert "GOOGLE_API_KEY is deprecated" in caplog.text
+
+
+def test_unknown_env_has_no_legacy_fallback(monkeypatch):
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("GOOGLE_API_KEY", "old")
+    assert resolve_api_key("GROQ_API_KEY") is None
 
 
 # --- tool calls + lanes ---------------------------------------------------

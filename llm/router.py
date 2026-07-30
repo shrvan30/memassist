@@ -29,7 +29,33 @@ from .budgets import BudgetLedger
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_PROVIDERS_YAML = Path(__file__).with_name("providers.yaml")
 
+# Superseded env var names, still honoured so an existing .env keeps working.
+# providers.yaml names the canonical one; this maps canonical -> legacy.
+_LEGACY_KEY_ENVS = {"GEMINI_API_KEY": "GOOGLE_API_KEY"}
+
 _log = logging.getLogger(__name__)
+
+
+def resolve_api_key(env_name: str) -> str | None:
+    """Read a provider key, accepting the superseded env var name with a warning.
+
+    ``.env.example`` documented ``GOOGLE_API_KEY`` while every consumer read
+    ``GEMINI_API_KEY``, so anyone who followed the template got a Gemini that was
+    silently keyless — the same class of invisible misconfiguration as the
+    zero-quota bug. Canonical name wins; the old one works and says so.
+    """
+    key = os.getenv(env_name)
+    if key:
+        return key
+    legacy = _LEGACY_KEY_ENVS.get(env_name)
+    legacy_key = os.getenv(legacy) if legacy else None
+    if legacy_key:
+        _log.warning(
+            "%s is deprecated; rename it to %s in your .env (still using it for now).",
+            legacy,
+            env_name,
+        )
+    return legacy_key
 
 
 # --- config + result types ------------------------------------------------
@@ -152,7 +178,7 @@ class Router:
         # Resolve API keys once (explicit override wins over environment).
         overrides = api_keys or {}
         self._keys: dict[str, str | None] = {
-            cfg.name: overrides.get(cfg.name, os.getenv(cfg.api_key_env))
+            cfg.name: overrides.get(cfg.name, resolve_api_key(cfg.api_key_env))
             for cfg in self.providers
         }
         self._clients: dict[str, ChatClient] = {}
