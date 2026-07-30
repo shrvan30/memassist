@@ -28,7 +28,7 @@ PROVIDERS_YAML: str = os.getenv(
 )
 # Provider keys are read by the router directly from these env vars; mirrored
 # here for visibility/debug. At least one must be set for the app to run.
-GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
+GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 OPENROUTER_API_KEY: str | None = os.getenv("OPENROUTER_API_KEY")
 MISTRAL_API_KEY: str | None = os.getenv("MISTRAL_API_KEY")

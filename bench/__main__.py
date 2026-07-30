@@ -254,9 +254,8 @@ def t1c_permanent_quota_is_not_a_transient_429(tmp):
     four04 = classify(FakeHTTPError(404, "model not found"))
 
     transient_ok = isinstance(transient_cls, errors.RateLimitError)
-    zero_ok = not (
-        type(zero_cls) is errors.RateLimitError  # noqa: E721 - exact type on purpose
-    )
+    # Exact type on purpose: a subclass would still be a distinct classification.
+    zero_ok = type(zero_cls) is not errors.RateLimitError
     notes.append(f"transient={type(transient_cls).__name__}")
     notes.append(f"zero_quota={type(zero_cls).__name__}")
     notes.append(f"404={type(four04).__name__}")
