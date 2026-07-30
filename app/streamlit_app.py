@@ -105,9 +105,7 @@ def render_sidebar(loop) -> None:
 
         st.divider()
         if st.button("Reset conversation", help="Clears the in-context window; keeps saved memory."):
-            loop.messages.clear()
-            loop.last_input_tokens = 0
-            loop.served_by = None
+            loop.reset()
             st.session_state.chat = []
             st.rerun()
 

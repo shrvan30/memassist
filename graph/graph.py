@@ -55,8 +55,13 @@ def route_heartbeat(state: AgentState, max_heartbeats: int) -> str:
 
 
 # --- wiring ---------------------------------------------------------------
-def build_graph(deps: Deps):
-    """Compile the turn graph. Nodes are bound to ``deps`` at build time."""
+def build_graph(deps: Deps, checkpointer=None):
+    """Compile the turn graph. Nodes are bound to ``deps`` at build time.
+
+    A checkpointer makes state survive between ``invoke`` calls, which is what
+    lets the FIFO accumulate across turns — and what ``interrupt()`` needs to
+    suspend a turn and resume it after a human decision (spec §4.3).
+    """
     g = StateGraph(AgentState)
     for name in (
         "build_prompt",
@@ -85,4 +90,4 @@ def build_graph(deps: Deps):
         ["build_prompt", "respond"],
     )
     g.add_edge("respond", END)
-    return g.compile()
+    return g.compile(checkpointer=checkpointer)
