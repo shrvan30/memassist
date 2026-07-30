@@ -535,28 +535,65 @@ no key are skipped automatically — the app runs on whatever you have.
 
 ## Run
 
+### The whole stack, one command
+
 ```bash
-make dev        # or: python -m streamlit run app/streamlit_app.py
-make test       # or: python -m pytest        (56 tests, no keys, no network)
-make mcp        # Phase 2 MCP server (currently a stub — exits 1)
-make clean      # remove caches and local data/
+cp .env.example .env          # paste at least one provider key
+docker compose up --build     # web + api + memory-mcp + postgres
+open http://localhost:3000
 ```
 
-If you launch with no keys set, the UI shows an onboarding gate and accepts a
-Gemini key inline for the session.
+| Service | Port | What it is |
+|---|---|---|
+| `web` | 3000 | Next.js UI — chat, memory inspector, approve/deny |
+| `api` | 8000 | FastAPI — SSE turns, session state, provider panel |
+| `memory-mcp` | 8090 | The six memory tools over MCP Streamable HTTP |
+| `postgres` | 5432 | `pgvector/pgvector:pg16` — all four tables |
 
-### The sidebar
+Every service waits for its dependency to be **healthy**, not merely started, so
+a fresh `up` cannot race Postgres accepting connections. The bge-small embedding
+model is baked into an image layer, so container start pays no ~130 MB download
+and does not depend on Hugging Face being reachable.
+
+`docker compose down -v` removes the `pgdata` volume and everything in it.
+
+### Locally, without Docker
+
+```bash
+make api        # FastAPI on :8000  (uvicorn api.main:app --reload)
+make web        # Next.js on :3000  (needs `cd web && npm install` once)
+make dev        # Streamlit on :8501 — the Phase 1 UI
+make mcp        # MCP memory server on stdio
+make mcp-http   # …or Streamable HTTP on :8090
+
+make test       # pytest — no keys, no network
+make bench      # the 110-point regression gate
+```
+
+Local runs default to SQLite + Chroma with no setup. To use Postgres instead:
+
+```bash
+export MEMASSIST_POSTGRES_DSN=postgresql://memassist:memassist@localhost:5432/memassist
+python -m memory_server.storage.migrate_to_postgres   # optional: bring data across
+```
+
+Setting the DSN is enough — the backend follows it. The migration is idempotent
+and never deletes from the source, so you can verify before switching.
+
+### The memory inspector
 
 | Panel | Shows |
 |---|---|
 | **Core memory** | Live `persona` and `human` blocks — watch them change as the agent edits itself |
-| **Context usage** | Progress bar against the active provider's window; warns at the pressure threshold |
-| **Memory tiers** | Recall message count, archival passage count |
-| **Providers** | ✅/⛔ per provider with the reason (`cooling_down`, `daily_requests_exhausted`, `no_api_key`) and seconds remaining |
+| **Context usage** | Bar against the active provider's window; warns at the pressure threshold |
+| **Memory tiers** | Recall messages, archival passages, messages in context |
+| **Providers** | ✅/⛔ per provider with the reason (`cooling_down`, `daily_requests_exhausted`, `no_api_key`) |
+| **External tools** | Which MCP tools loaded, their trust zone, and which are approval-gated |
 
-Every assistant reply is badged `⚡ served by groq`. **Reset conversation**
-clears the in-context window but keeps all saved memory — the fastest way to see
-the persistence claim demonstrated.
+Every reply is badged `⚡ served by groq`. Tool calls, evictions and security
+decisions stream live as they happen. **Reset conversation** clears the
+in-context window but keeps saved memory — the fastest way to see the
+persistence claim demonstrated.
 
 ---
 
