@@ -22,8 +22,8 @@ if str(ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 import assembly  # noqa: E402
-import config  # noqa: E402
 from agent.token_budget import usage_fraction  # noqa: E402
+from llm.router import resolve_api_key  # noqa: E402
 
 st.set_page_config(page_title="MemAssist", page_icon="🧠", layout="wide")
 
@@ -36,7 +36,9 @@ PROVIDER_ENVS = {
 
 
 def any_key_present() -> bool:
-    return any(os.getenv(env) for env in PROVIDER_ENVS.values())
+    # Same resolver the router uses, so the gate can never disagree with it
+    # about whether a key exists (e.g. a .env still using GOOGLE_API_KEY).
+    return any(resolve_api_key(env) for env in PROVIDER_ENVS.values())
 
 
 def onboarding_gate() -> None:

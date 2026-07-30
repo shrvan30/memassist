@@ -18,7 +18,6 @@ from .storage import sqlite as sql
 from .storage.chroma import ArchivalStore
 from .storage.sqlite import SQLiteStore
 
-
 # A provenance tag the model typed into `content` itself, rather than passing it
 # as the `source` argument. Matched at the end of the line only.
 _PROVENANCE_TAG_RE = re.compile(r"\s*\[(?:stated|inferred)\]\s*$", re.IGNORECASE)
