@@ -1,7 +1,7 @@
 # ARCHITECTURE — MemAssist (as-built)
 
 This document describes MemAssist **as the code actually is** at the end of
-Phase 4 (deterministic bench 110/110, on either storage backend). It is a developer map: the
+Phase 5 (deterministic bench 115/115, on either storage backend). It is a developer map: the
 file layout, the data flows through one turn, and the failure-handling designs —
 in particular the Gemini `ProviderPermanentError` fix.
 
@@ -32,7 +32,13 @@ memassist/
   security/               The AI security layer (spec §6).
     sanitizer.py          Untrusted results -> marked data; 7 injection patterns
     guards.py             Core-memory lockout, source=external, allowlist, path jail
+    sensitivity.py        The privacy gate: secrets/identifiers, deterministic
     injections/*.yaml     T11 red-team corpus — read by BOTH bench and CI
+
+  jobs/                   Background work. Never on the interactive lane.
+    consolidate.py        T10: recall -> archival via Mistral, behind the gate
+
+  observability.py        Langfuse tracing; entirely inert unless keys are set
 
   mcp_client.py           External MCP servers from mcp_servers.yaml; trust zones
 
@@ -60,12 +66,14 @@ memassist/
     sessions.py           session id -> AgentLoop -> checkpointer thread
   web/                    Next.js + Tailwind UI; PARITY.md tracks the cutover
 
-  bench/                  Deterministic, offline benchmark (110 pts). `python -m bench`
-  tests/                  pytest suite (120 tests, no API keys, no provider calls)
+  bench/                  Deterministic, offline benchmark (115 pts). `python -m bench`
+    stress.py             UNSCORED load scenarios. `python -m bench --stress`
+  tests/                  pytest suite (236 tests, no API keys, no provider calls)
   workspace/              The filesystem server's jail — nothing else is reachable
 
   Dockerfile  web/Dockerfile  docker-compose.yml
   Makefile  pyproject.toml  requirements.txt  .github/workflows/ci.yml
+  README.md  CHANGELOG.md  .claude/settings.json
   .mcp.json  mcp_servers.yaml   MCP registration (server is Phase 2)
 ```
 
@@ -78,6 +86,9 @@ The loop depends on nothing concrete. It talks to exactly two interfaces:
 | `LLMRouter` | `chat`, `context_window`, `min_context_window` | `llm.router.Router` | (stable) |
 | `MemoryInterface` | `render_core_memory`, `memory_stats`, `dispatch`, `record_event` | `memory_server.memory_tools.MemoryTools` | (stable) |
 | `ExternalToolset` | `names`, `trust_of`, `is_gated`, `jail_of`, `call` | `mcp_client.ExternalTools` | (stable; stdio or HTTP) |
+
+The loop also takes a **checkpointer** and a **thread id**, both chosen in
+`assembly.py` (§13). It never learns which one it got.
 
 Because the loop sees only these, later phases are local changes: Phase 2 swaps
 the `MemoryInterface` implementation for an MCP client; Phase 3 swaps SQLite for
@@ -312,11 +323,11 @@ signed-hashing embedder is retained as an injectable zero-dependency fallback.
 
 ## 8. Verification
 
-- **`make test`** → pytest, 120 tests, no API keys, no provider calls and no
+- **`make test`** → pytest, 236 tests, no API keys, no provider calls and no
   MCP subprocesses. Unit tests inject the hashing embedder as a test double, so
   CI needs no bge-small download; the benchmark keeps the real model, which is
   what T5 measures.
-- **`make bench`** → the deterministic 110-point suite in `bench/` (every
+- **`make bench`** → the deterministic 115-point suite in `bench/` (every
   provider call is a scripted fake; every check gets a fresh temp SQLite +
   Chroma). Reproducible, so a score delta is attributable to a source change.
 - **`make bench LIVE=1`** → adds one real request per configured provider,
@@ -326,7 +337,8 @@ signed-hashing embedder is retained as an injectable zero-dependency fallback.
   endpoint with `trust_remote_code`, and Chroma runs embedded here with no
   server. No fixed release exists, so without the ignore the gate can never pass.
 
-Current: **bench 110/110** (T1–T8 100, T11 10), pytest green, CI green.
+Current: **bench 115/115** (T1–T8 100, T10 5, T11 10), pytest green, CI green
+(dual-backend python matrix + node job + GHCR publish on tag).
 
 ---
 
@@ -342,18 +354,27 @@ Current: **bench 110/110** (T1–T8 100, T11 10), pytest green, CI green.
   real and registered in `.mcp.json` — it exists for external clients.
 - **`mcp` is pinned `<2`**: `langchain-mcp-adapters` 0.3.1 imports
   `RequestContext` from `mcp.shared.context`, which mcp 2.0 removed.
-- **Schema budget.** The filesystem server alone exports 14 tools, so 16
-  external schemas now ride in every prompt. Spec §5.1 caps active servers at 3
-  for exactly this reason; trimming to the tools actually used is the obvious
-  next economy.
-- **Phase 5 (not built):** the Mistral consolidation lane with the `sensitive`
-  filter (T10), Langfuse tracing tagged by provider, and the CD deploy
-  pipeline. The `MemoryInterface` and `ExternalToolset` seams are what keep
-  those additive.
-- **The checkpointer is still `InMemorySaver`.** Turn state does not survive
-  an API restart and a second replica would not see it — both move together
-  when a Postgres checkpointer lands. Saved memory (core/recall/archival) is
-  unaffected: that is already in the database.
+- **Schema budget.** Closed in Phase 4 by the registry's `tools:` allowlist —
+  16 external schemas became 6 (see §12).
+- **The `InMemorySaver` gap is closed** (Phase 5, §13). The checkpointer is now
+  chosen alongside the storage backend, so turn state is durable whenever the
+  memory is.
+- **The session registry is still an in-process dict.** A second API replica
+  rebuilds its own `AgentLoop` objects rather than sharing them. That is now
+  merely wasteful rather than wrong: the state they would both read is in the
+  database, so either replica can serve a session correctly.
+- **No free-tier deployment exists for the application.** Checked July 2026:
+  Render free is 512 MB / 0.1 CPU (this image carries CPU torch and a local
+  embedder), Fly and Koyeb have closed their free tiers to new accounts, and
+  Hugging Face now bills Docker Spaces. Only the *database* has a real free
+  option (Neon). The supported deployment is local compose; see the README.
+- **The interrupt-across-restart path is verified by unit test, not in
+  compose.** The compose stack sets `MEMASSIST_EXTERNAL_TOOLS=0` because the
+  image carries no `uvx`/`npx`, so there is no gated filesystem tool to suspend
+  a turn there. `tests/test_checkpointer.py` covers it against a real
+  PostgresSaver with the saver and loop both destroyed between suspend and
+  resume; the container-level check confirms the weaker claim that turn state
+  survives a SIGKILL.
 
 ---
 
@@ -483,7 +504,7 @@ Differences are dialect, never behaviour: `created_at` is a real `timestamptz`
 in Postgres but is formatted back to `YYYY-MM-DD HH:MM:SS` on read, so both
 backends hand callers identical rows. `tests/test_storage_backends.py` runs one
 suite against both (each Postgres test in a throwaway schema), and the benchmark
-scores 110/110 either way.
+scores identically either way — 115/115 as of Phase 5.
 
 **The ledger matters more than it looks.** In a container the SQLite file is
 ephemeral, so a Postgres deployment that left the ledger on disk would hand the
@@ -542,3 +563,96 @@ decides what the context budget is spent on rather than whatever a server
 happens to export: the filesystem server's 14 tools became 4, and 16 external
 schemas became 6. Deny-by-default is unaffected — a dropped tool is simply
 absent rather than soft-blocked.
+
+---
+
+## 13. Phase 5 — durability, the background lane, observability
+
+### The checkpointer is the stores' sibling
+
+`assembly.build_checkpointer()` returns a `PostgresSaver` when the Postgres
+backend is selected and an `InMemorySaver` otherwise. It sits next to
+`build_stores()` on purpose: turn state was the last thing living only in
+process memory, and pairing it with storage keeps that a single decision rather
+than a second one someone can forget.
+
+A missing DSN under `MEMASSIST_STORAGE_BACKEND=postgres` **raises**. Falling
+back to an `InMemorySaver` would recreate this exact gap with durability
+apparently configured and silently not delivered.
+
+Two things had to change for persistence to be *usable* rather than merely
+present:
+
+- **The thread id is the caller's to supply**, and the API passes the session
+  id. It was `uuid4()` per `AgentLoop` instance, so a rebuilt loop addressed a
+  fresh thread and the persisted checkpoint was durable but unreachable.
+- **`pending_approval` became a view over the checkpoint.** A restarted process
+  builds a new loop object with no memory of having asked anything; an instance
+  attribute reported "nothing pending" over a graph still holding an interrupt.
+  Same reasoning that made `messages` and `served_by` views in Phase 2 — this
+  one was simply missed.
+
+`reset()` now deletes the thread instead of rotating to a new id. Rotation was
+what bounded checkpoint growth, but it cannot coexist with a stable thread id,
+and against Postgres it would strand rows nobody will ever read.
+`delete_thread` is on the base checkpointer interface, so this is one behaviour
+on both savers, and it also clears a pending interrupt — which a state *update*
+would leave scheduled.
+
+Verified two ways: a unit test that destroys the saver and the loop between
+suspending on an approval and resuming it, and a container-level SIGKILL of the
+API that leaves 12 checkpoint rows behind and comes back to identical state.
+
+### The background lane and its gate
+
+`jobs/consolidate.py` summarizes recall into archival through
+`chat_background()`, which reaches Mistral and nowhere else. The interesting
+part is `security/sensitivity.py`, because Mistral's free tier trains on
+prompts: this job sends content the user is not watching go out, to a model
+that keeps it.
+
+Four independent exclusions, kept together because they fail differently:
+
+1. `event_type='message'` only — **structural**, so every verbatim external
+   tool result (§11) is excluded by its type rather than by a regex noticing.
+2. No untrusted markers — catches external content *echoed* into an assistant
+   message, which rule 1 cannot see.
+3. Nothing the sensitivity detector flags.
+4. No `system_event` rows — guard denials quote the arguments they refused.
+
+Then the assembled payload is re-checked, because the bytes leaving the process
+are what matter, not the rows they were built from.
+
+Withheld content is reported **by category**, not as a total. That is what
+caught a dead `card-number` rule: the outcome was right (the card was withheld)
+but the reason was `aadhaar`, and the discrepancy was the only visible symptom.
+
+Archival passages carry `sensitive`, on both backends, defaulting to
+*detecting* rather than to `False` so a caller that forgets it fails closed.
+This was README defect #5 and the documented prerequisite for the whole lane.
+
+### Tracing
+
+One trace per turn: a span per graph node, a span per dispatched tool, provider
+tags from `served_by`, and named events for sanitizer hits, guard denials and
+approval outcomes. Disabled unless both Langfuse keys are set, and disabled
+means *inert* — `traced_node` branches rather than entering a no-op context
+manager, because it runs on every node of every heartbeat including in the
+benchmark.
+
+**Langfuse Cloud's free tier over self-hosting.** Self-hosting v3+ needs
+Postgres *and* ClickHouse *and* Redis *and* MinIO. This project's premise is
+$0/month and it already asks for four containers; four more to watch the first
+four is the tail wagging the dog. `LANGFUSE_HOST` switches to a self-hosted
+instance and changes nothing else. The trade-off the cloud asks for —
+conversation content leaving the machine — is handled by routing every trace
+payload through the same detector that gates the Mistral lane.
+
+### The hard eviction cap
+
+Eviction used to fire only on `offloaded and under_pressure` — only after the
+*model* answered the pressure warning. The stress tier drove 100 turns to 219%
+of the limit with zero evictions, because a scripted model that never offloads
+is a model that never frees anything. `Deps.hard_evict_fraction` (0.95) now
+forces the cut regardless, with a different notice: claiming the messages were
+summarized when nothing summarized them is a lie the model then acts on.

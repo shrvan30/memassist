@@ -339,7 +339,7 @@ gated on T1–T8 holding at 100.
 ## Phase 5 — background lane, durability, observability
 
 **115 / 115** on BOTH storage backends (T1–T8 100, T10 5, T11 10) ·
-`pytest`: 179 passed (postgres) / 159 passed + 20 skipped (sqlite)
+`pytest`: 236 passed (postgres) / 216 passed + 20 skipped (sqlite)
 
 ### T10 — Background consolidation & the privacy gate (5)
 

@@ -11,8 +11,8 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.0.0] — 2026-07-31
 
-First release. Bench **115/115** on both storage backends, `pytest` 179 passed
-(Postgres) / 159 passed + 20 skipped (SQLite), CI green across three jobs.
+First release. Bench **115/115** on both storage backends, `pytest` 236 passed
+(Postgres) / 216 passed + 20 skipped (SQLite), CI green across three jobs.
 
 ### Added
 
