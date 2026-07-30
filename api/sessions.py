@@ -120,10 +120,14 @@ class Session:
 class SessionRegistry:
     """Process-local session store.
 
-    ponytail: in-process dict. Turn state already lives in the graph's
-    InMemorySaver, so a second API replica would not see it either — both move
-    together when a Postgres checkpointer lands, and neither is worth splitting
-    early.
+    The *turn state* behind a session is durable on the Postgres backend (the
+    checkpointer is keyed by session id, so a restarted process rebuilds a loop
+    onto the same thread and a suspended approval is still suspended). This
+    dict is only the cache of live ``AgentLoop`` objects in front of it.
+
+    ponytail: still an in-process dict, so a second API replica rebuilds its own
+    loops rather than sharing these. That is now merely wasteful instead of
+    wrong — the state they would both read is in the database.
     """
 
     def __init__(self) -> None:
@@ -141,6 +145,7 @@ class SessionRegistry:
     def shutdown(self) -> None:
         if self._external is not None:
             self._external.close()
+        assembly.close_checkpointers()
 
     def get(self, session_id: str) -> Session:
         with self._lock:
@@ -149,7 +154,10 @@ class SessionRegistry:
                 return existing
             memory = EventRecorder(assembly.build_memory(session_id=session_id))
             loop = assembly.build_loop(
-                memory=memory, router=self._router, external=self._external
+                memory=memory,
+                router=self._router,
+                external=self._external,
+                session_id=session_id,
             )
             session = Session(session_id=session_id, loop=loop, memory=memory)
             self._sessions[session_id] = session
