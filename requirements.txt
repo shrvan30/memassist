@@ -4,6 +4,7 @@ pyyaml>=6.0           # llm/providers.yaml
 langgraph>=0.2        # graph/ owns control flow only — never provider calls
 langgraph-checkpoint-postgres>=2.0  # durable turn state; paired with the pg backend
 psycopg-pool>=3.2     # the checkpointer's connection pool (turns run off-thread)
+langfuse>=3.0        # Phase 5 tracing; inert unless LANGFUSE_* keys are set
 langchain-mcp-adapters>=0.3   # external MCP servers as tools (mcp_servers.yaml)
 mcp>=1.29,<2          # PINNED: adapters 0.3.1 import RequestContext, dropped in mcp 2.0
 chromadb>=0.5

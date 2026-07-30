@@ -17,6 +17,7 @@ from typing import Any
 
 from langgraph.types import interrupt
 
+import observability
 from agent.prompts import eviction_notice, memory_pressure_warning, render_system_prompt
 from agent.token_budget import approx_tokens, format_usage, is_under_pressure, usage_fraction
 from llm.errors import AllProvidersExhausted
@@ -205,6 +206,11 @@ def security_gate(state: AgentState, deps: Deps) -> dict:
             deps.memory.record_event(
                 "system_event", EVENT_SECURITY, f"Guard refused {tc.name}: {decision['reason']}"
             )
+            observability.event(
+                "security.guard_denied",
+                level="WARNING",
+                metadata={"tool": tc.name, "reason": decision["reason"]},
+            )
         elif decision["rewritten"]:
             deps.memory.record_event(
                 "system_event",
@@ -217,6 +223,11 @@ def security_gate(state: AgentState, deps: Deps) -> dict:
             EVENT_SECURITY,
             f"Human {'approved' if approved else 'denied'}: "
             f"{', '.join(a['name'] for a in gated)}",
+        )
+        observability.event(
+            "security.interrupt_answered",
+            level="DEFAULT" if approved else "WARNING",
+            metadata={"approved": approved, "tools": [a["name"] for a in gated]},
         )
 
     return {
@@ -268,7 +279,13 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
                 "assistant", EVENT_TOOL_CALL, f"{tc.name}({tc.arguments})", served_by=served_by
             )
             if tc.name in external_names:
-                tool_content = external.call(tc.name, _external_args(args))
+                with observability.span(
+                    tc.name,
+                    as_type="tool",
+                    input=args,
+                    metadata={"trust": external.trust_of(tc.name), "zone": "external"},
+                ):
+                    tool_content = external.call(tc.name, _external_args(args))
                 # The VERBATIM result goes to recall before anything rewrites it
                 # — the sanitized copy is what the model sees, the original is
                 # what an audit reads (spec §6.2).
@@ -284,7 +301,15 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
                         }
                     )
             else:
-                tool_content = deps.memory.dispatch(tc.name, args)
+                with observability.span(
+                    tc.name,
+                    as_type="tool",
+                    input=args,
+                    metadata={"trust": "internal", "zone": "memory"},
+                ) as s:
+                    tool_content = deps.memory.dispatch(tc.name, args)
+                    if s is not None:
+                        s.update(output=tool_content[:500])
                 deps.memory.record_event(
                     "tool", EVENT_TOOL_RESULT, f"{tc.name} -> {tool_content}"
                 )
@@ -353,6 +378,16 @@ def sanitize_results(state: AgentState, deps: Deps) -> dict:
                 "system_event",
                 EVENT_SECURITY,
                 f"Injection patterns flagged in {item['name']} result: {', '.join(clean.flags)}",
+            )
+            observability.event(
+                "security.sanitizer_flagged",
+                level="WARNING",
+                metadata={
+                    "tool": item["name"],
+                    "server": item["server"],
+                    "patterns": clean.flags,
+                    "marker_collisions": clean.marker_collisions,
+                },
             )
 
     return {

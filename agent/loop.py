@@ -29,6 +29,7 @@ from uuid import uuid4
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+import observability
 from graph import build_graph, recursion_limit
 from graph.nodes import EVENT_MESSAGE
 from graph.state import Deps, LLMRouter, MemoryInterface
@@ -212,4 +213,42 @@ class AgentLoop:
     def _invoke(self, payload) -> list[str]:
         # Everything already delivered this turn stands even if the turn then
         # suspends; the interrupt itself is read back off the checkpoint.
-        return self._graph.invoke(payload, self._config).get("final_reply", [])
+        with observability.span(
+            "turn", as_type="agent", input=_trace_input(payload)
+        ) as turn:
+            final = self._graph.invoke(payload, self._config)
+            summary = observability.summarize_turn(final)
+            if turn is not None:
+                turn.update(output={"replies": len(final.get("final_reply") or [])},
+                            metadata=summary)
+            observability.update_trace(
+                turn,
+                session_id=self._thread_id,
+                # Tags are what make a trace findable: "show me every turn where
+                # the guards fired" is the question this exists to answer.
+                tags=_trace_tags(summary),
+            )
+            return final.get("final_reply", [])
+
+
+def _trace_input(payload) -> dict:
+    """Only the new user text, never the accumulated FIFO — the window is
+    re-sent every heartbeat and would dominate the trace with duplicates."""
+    if not isinstance(payload, dict):
+        return {"resume": True}
+    messages = payload.get("messages") or []
+    last = messages[-1] if messages else {}
+    return {"user": last.get("content", ""), "context_messages": len(messages)}
+
+
+def _trace_tags(summary: dict) -> list[str]:
+    tags = [f"provider:{summary.get('served_by') or 'none'}"]
+    if summary.get("saw_untrusted"):
+        tags.append("untrusted-content")
+    if summary.get("injection_flags"):
+        tags.append("injection-flagged")
+    if summary.get("blocked_tools"):
+        tags.append("guard-denied")
+    if summary.get("interrupted"):
+        tags.append("interrupted")
+    return tags
