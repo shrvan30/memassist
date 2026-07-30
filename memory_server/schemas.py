@@ -66,8 +66,14 @@ class ConversationSearchDateInput(BaseModel):
 
 
 class ArchivalMemoryInsertInput(BaseModel):
+    # 'external' is accepted here but NOT on core memory: knowledge from an
+    # untrusted source may be archived with its origin attached, never promoted
+    # to the always-in-context blocks (spec §6.3). The guards set it; the model
+    # is not asked to be honest about it.
     content: str = Field(..., description="The passage to store for long-term recall.")
-    source: Literal["stated", "inferred"] = Field(default="inferred", description=_SOURCE_DESC)
+    source: Literal["stated", "inferred", "external"] = Field(
+        default="inferred", description=_SOURCE_DESC
+    )
     request_heartbeat: bool = Field(default=False, description=_HEARTBEAT_DESC)
 
 

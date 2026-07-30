@@ -17,6 +17,7 @@ from typing import Any
 from agent.prompts import eviction_notice, memory_pressure_warning, render_system_prompt
 from agent.token_budget import approx_tokens, format_usage, is_under_pressure, usage_fraction
 from llm.errors import AllProvidersExhausted
+from security.guards import check_tool_call
 from security.sanitizer import sanitize_external
 
 from .state import AgentState, Deps
@@ -137,13 +138,48 @@ def call_llm(state: AgentState, deps: Deps) -> dict:
 
 
 def security_gate(state: AgentState, deps: Deps) -> dict:
-    """Pass-through stub (spec §6.3).
+    """Rule on every pending tool call before anything runs (spec §6.3).
 
-    Phase 3 inspects ``pending_tool_calls`` here and parks a destructive one in
-    ``gated_action`` for a human interrupt. Phase 2 dispatches only the six own
-    memory tools, none of which is destructive, so nothing is gated yet.
+    Deny-by-default on the node's allowlist, core memory closed once untrusted
+    content is in the turn, and archival writes forced to ``source=external``.
+    Decisions are recorded per tool_call_id; ``dispatch_tools`` executes them.
     """
-    return {"gated_action": None}
+    allowed = deps.allowed_tools()
+    saw_untrusted = bool(state.get("saw_untrusted"))
+    decisions: dict[str, dict] = {}
+    blocked: list[str] = []
+
+    for tc in state.get("pending_tool_calls") or []:
+        decision = check_tool_call(
+            tc.name,
+            tc.parsed_arguments(),
+            allowed_tools=allowed,
+            saw_untrusted=saw_untrusted,
+        )
+        decisions[tc.id] = {
+            "allowed": decision.allowed,
+            "arguments": decision.arguments,
+            "reason": decision.reason,
+            "rewritten": decision.rewritten,
+        }
+        if decision.refused:
+            blocked.append(tc.name)
+            _log.warning("Guard refused %s: %s", tc.name, decision.reason)
+            deps.memory.record_event(
+                "system_event", EVENT_SECURITY, f"Guard refused {tc.name}: {decision.reason}"
+            )
+        elif decision.rewritten:
+            deps.memory.record_event(
+                "system_event",
+                EVENT_SECURITY,
+                f"Guard rewrote {tc.name} arguments: {decision.rewritten}",
+            )
+
+    return {
+        "tool_decisions": decisions,
+        "blocked_tools": [*state.get("blocked_tools", []), *blocked],
+        "gated_action": None,
+    }
 
 
 def dispatch_tools(state: AgentState, deps: Deps) -> dict:
@@ -157,10 +193,26 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
 
     external = deps.external
     external_names = external.names() if external else frozenset()
+    decisions = state.get("tool_decisions") or {}
     untrusted: list[dict] = []
 
     for tc in state["pending_tool_calls"]:
-        args = tc.parsed_arguments()
+        decision = decisions.get(tc.id)
+        if decision is not None and not decision["allowed"]:
+            # Refused by security_gate. The call is still ANSWERED — an
+            # unanswered tool_call is a transcript providers reject — but with
+            # the refusal text instead of a result.
+            deps.memory.record_event(
+                "assistant", EVENT_TOOL_CALL, f"{tc.name}({tc.arguments}) [refused]",
+                served_by=served_by,
+            )
+            messages.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": decision["reason"]}
+            )
+            wants_heartbeat = True  # let the model recover on the next round
+            continue
+
+        args = decision["arguments"] if decision is not None else tc.parsed_arguments()
         if tc.name == "send_message":
             text = args.get("text", "")
             outputs.append(text)

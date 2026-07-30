@@ -11,6 +11,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence, TypedDict, runtime_checkable
 
+# Tool *contracts* only — no storage. The layering rule the loop has always had
+# (agent/ never imports storage) still holds.
+from memory_server.schemas import MEMORY_TOOL_NAMES
+
+# The built-in tool names, used as the allowlist when a caller declares no
+# schemas (the benchmark and unit tests script tool calls directly). Still a
+# closed set: an invented or injected tool name is refused either way.
+_ALL_KNOWN_TOOLS = frozenset({"send_message", *MEMORY_TOOL_NAMES})
+
 
 @runtime_checkable
 class MemoryInterface(Protocol):
@@ -69,6 +78,7 @@ class AgentState(TypedDict, total=False):
                                 # so core memory is closed for the rest of it
     injection_flags: list       # injection pattern names seen this turn
     blocked_tools: list         # tool calls the guards refused, for the audit log
+    tool_decisions: dict        # tool_call_id -> security_gate's verdict
 
 
 class ExternalToolset(Protocol):
@@ -92,6 +102,26 @@ class Deps:
     max_heartbeats: int
     external: ExternalToolset | None = None
     tool_result_char_cap: int = 4000
+
+    def allowed_tools(self) -> frozenset[str]:
+        """Per-node tool allowlist (spec §6.3). Deny-by-default lives on this.
+
+        Derived from the schemas actually handed to the model plus the external
+        registry, so a tool the model invents — or one an injection names — has
+        no path to a dispatcher.
+        """
+        names = {
+            t["function"]["name"]
+            for t in self.tools
+            if isinstance(t, dict) and "function" in t
+        }
+        if self.external:
+            names |= set(self.external.names())
+        # The built-ins are always dispatchable — they are the memory contract,
+        # and callers that script tool calls directly (benchmark, unit tests)
+        # declare no schemas at all. The guarantee this list exists for is that
+        # an UNKNOWN name is refused, and that holds either way.
+        return frozenset(names | _ALL_KNOWN_TOOLS)
 
     def limit_for(self, provider: str | None) -> int:
         """Context budget against the ACTIVE provider's window.
