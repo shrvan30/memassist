@@ -67,6 +67,8 @@ class AgentState(TypedDict, total=False):
                                 # sanitize_results (spec §6.1)
     saw_untrusted: bool         # an untrusted result entered context this turn,
                                 # so core memory is closed for the rest of it
+    injection_flags: list       # injection pattern names seen this turn
+    blocked_tools: list         # tool calls the guards refused, for the audit log
 
 
 class ExternalToolset(Protocol):
@@ -89,6 +91,7 @@ class Deps:
     pressure_threshold: float
     max_heartbeats: int
     external: ExternalToolset | None = None
+    tool_result_char_cap: int = 4000
 
     def limit_for(self, provider: str | None) -> int:
         """Context budget against the ACTIVE provider's window.

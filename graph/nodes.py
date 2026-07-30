@@ -17,6 +17,7 @@ from typing import Any
 from agent.prompts import eviction_notice, memory_pressure_warning, render_system_prompt
 from agent.token_budget import approx_tokens, format_usage, is_under_pressure, usage_fraction
 from llm.errors import AllProvidersExhausted
+from security.sanitizer import sanitize_external
 
 from .state import AgentState, Deps
 
@@ -32,6 +33,7 @@ EVENT_TOOL_RESULT = "tool_result"
 EVENT_PRESSURE_WARNING = "pressure_warning"
 EVENT_EVICTION = "eviction"
 EVENT_INTERNAL = "internal"
+EVENT_SECURITY = "security"
 
 # Below this many messages there is nothing worth paging out, so an offload
 # leaves the queue alone.
@@ -216,13 +218,53 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
 
 
 def sanitize_results(state: AgentState, deps: Deps) -> dict:
-    """Pass-through stub (spec §6.2).
+    """Rewrite untrusted tool results as marked-up data (spec §6.2).
 
-    Phase 3 wraps results from trust=untrusted MCP servers in
-    ``<untrusted_content>`` markers here, before they enter state. Phase 2 has
-    only the trusted-internal memory server, whose results pass through.
+    The raw result is already in recall memory (``dispatch_tools`` logs it
+    verbatim for audit); what the *model* sees is only ever the sanitized copy,
+    because the next ``call_llm`` happens strictly after this node.
+
+    ``saw_untrusted`` latches for the rest of the turn: once hostile content is
+    in the window, no later tool call in the same turn can be assumed to be the
+    user's idea, so the guards close core memory (§6.3).
     """
-    return {}
+    pending = state.get("untrusted_results") or []
+    if not pending:
+        return {}
+
+    by_id = {item["tool_call_id"]: item for item in pending}
+    messages = list(state["messages"])
+    flagged: list[str] = []
+
+    for i, message in enumerate(messages):
+        if message.get("role") != "tool":
+            continue
+        item = by_id.get(message.get("tool_call_id"))
+        if item is None:
+            continue
+        clean = sanitize_external(
+            str(message.get("content", "")),
+            source=f"{item['name']} via {item['server'] or 'external server'}",
+            char_cap=deps.tool_result_char_cap,
+        )
+        messages[i] = {**message, "content": clean.text}
+        if clean.flags:
+            flagged.extend(clean.flags)
+            _log.warning(
+                "Prompt injection flagged in %s result: %s", item["name"], ", ".join(clean.flags)
+            )
+            deps.memory.record_event(
+                "system_event",
+                EVENT_SECURITY,
+                f"Injection patterns flagged in {item['name']} result: {', '.join(clean.flags)}",
+            )
+
+    return {
+        "messages": messages,
+        "untrusted_results": [],
+        "saw_untrusted": True,
+        "injection_flags": [*state.get("injection_flags", []), *flagged],
+    }
 
 
 def respond(state: AgentState, deps: Deps) -> dict:
