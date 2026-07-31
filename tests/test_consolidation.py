@@ -10,14 +10,36 @@ what it was called with, and the tests read that.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 from jobs import consolidate as job
 from llm.router import ChatResult, Usage
-from security.sanitizer import OPEN_MARKER
+from security.sanitizer import CLOSE_MARKER, OPEN_MARKER
 
 SECRET = "my api key is sk-abcdefghijklmnopqrstuvwx"
 CARD = "card 4111 1111 1111 1111"
+
+
+def _corpus_payload(filename: str, case_name: str) -> str:
+    """Read an attack payload from the shared corpus.
+
+    The corpus is the single source of attack cases (spec §6.5): a finding is
+    written there once and every harness that cares picks it up. This job is one
+    of those harnesses — the close-marker case exists because *this* check was
+    the one that missed it.
+    """
+    path = Path(__file__).resolve().parent.parent / "security" / "injections" / filename
+    corpus = yaml.safe_load(path.read_text(encoding="utf-8"))
+    case = next(c for c in corpus["cases"] if c["name"] == case_name)
+    return case["payload"]
+
+
+CORPUS_CLOSE_MARKER_PAYLOAD = _corpus_payload(
+    "prompt_exfiltration.yaml", "close-marker-only"
+)
 
 
 class CapturingRouter:
@@ -166,6 +188,52 @@ def test_untrusted_markers_echoed_into_a_message_are_still_caught(mem):
     assert "I prefer tea." in router.outbound_text
 
 
+def test_a_bare_closing_marker_is_rejected_by_the_final_outbound_check():
+    """PR #4 review. The final check on the assembled payload tested
+    OPEN_MARKER only, so a bare CLOSE_MARKER — the cheapest way to forge an end
+    to the sanitizer's envelope — passed the one gate that inspects the actual
+    bytes leaving the process."""
+    assert job.OPEN_MARKER not in CORPUS_CLOSE_MARKER_PAYLOAD
+    assert CLOSE_MARKER in CORPUS_CLOSE_MARKER_PAYLOAD
+
+    row = {"role": "assistant", "event_type": "message",
+           "content": CORPUS_CLOSE_MARKER_PAYLOAD}
+    assert job.withhold_reason(row) == job.WITHHELD_EXTERNAL
+
+
+def test_the_corpus_close_marker_payload_never_reaches_the_provider(mem):
+    """The corpus case, driven end to end through the real job."""
+    seed(mem, [
+        ("user", "message", "I work as a nurse."),
+        ("assistant", "message", CORPUS_CLOSE_MARKER_PAYLOAD),
+    ])
+    router = CapturingRouter()
+
+    job.consolidate(mem, router)
+
+    assert CLOSE_MARKER not in router.outbound_text
+    assert "quarterly figures" not in router.outbound_text
+    assert "nurse" in router.outbound_text
+
+
+def test_the_outbound_check_backstops_a_marker_the_row_filter_missed(mem, monkeypatch):
+    """The row filter and the payload check are two layers, not one.
+
+    Neutering `withhold_reason` proves the final check on the assembled
+    transcript stops a forged marker on its own — which is the whole reason
+    that check exists, and the reason it must test BOTH markers.
+    """
+    monkeypatch.setattr(job, "withhold_reason", lambda row: None)
+    seed(mem, [("assistant", "message", CORPUS_CLOSE_MARKER_PAYLOAD)])
+    router = CapturingRouter()
+
+    result = job.consolidate(mem, router)
+
+    assert router.payloads == [], "the payload check must stop it alone"
+    assert result.skipped_reason.startswith("payload check failed")
+    assert "external marker" in result.skipped_reason
+
+
 def test_nothing_sendable_means_no_provider_call_at_all(mem):
     seed(mem, [("user", "message", SECRET)])
     router = CapturingRouter()
@@ -256,3 +324,19 @@ def test_interval_parsing(text, seconds):
 def test_a_bad_interval_is_rejected_loudly():
     with pytest.raises(ValueError, match="Cannot parse interval"):
         job.parse_every("nightly")
+
+
+@pytest.mark.parametrize("text", ["0", "0s", "0m", "0h", "0d", "  0  "])
+def test_non_positive_intervals_are_rejected_on_both_parse_paths(text):
+    """PR #4 review. Zero parses cleanly either way — "0" is a digit, "0m"
+    matches the duration pattern — and would make run_scheduled a spin loop with
+    no wait between passes, hammering the provider. Checked after the paths
+    converge, so every spelling of zero raises."""
+    with pytest.raises(ValueError, match="interval must be positive"):
+        job.parse_every(text)
+
+
+def test_the_smallest_positive_interval_still_parses():
+    """The guard must reject zero, not everything small."""
+    assert job.parse_every("1") == 1
+    assert job.parse_every("1s") == 1
