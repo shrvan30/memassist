@@ -177,7 +177,13 @@ def consolidate(
     # Belt-and-braces on the assembled payload, not just its parts: the check
     # that matters is the one on the bytes actually leaving the process.
     leaked = classify(transcript)
-    if leaked or OPEN_MARKER in transcript:
+    # BOTH markers. Testing OPEN_MARKER alone made this check weaker than the
+    # per-row `withhold_reason` it is meant to backstop, which has always tested
+    # both — so the one place that inspects the actual outbound bytes was the
+    # one place a bare closing marker could pass. Corpus case: close-marker-only
+    # in security/injections/prompt_exfiltration.yaml (PR #4 review).
+    forged_marker = OPEN_MARKER in transcript or CLOSE_MARKER in transcript
+    if leaked or forged_marker:
         # Unreachable via select_payload; kept because "unreachable" is a claim
         # about today's code, and this is the last line before the network.
         result.skipped_reason = f"payload check failed: {leaked or 'external marker'}"
@@ -229,14 +235,26 @@ _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
 
 def parse_every(text: str) -> int:
-    """'6h' -> 21600. Plain digits are seconds."""
+    """'6h' -> 21600. Plain digits are seconds. Must be positive.
+
+    Zero parses cleanly on both paths — ``"0"`` is a digit and ``"0m"`` matches
+    the duration pattern — and would turn ``run_scheduled`` into a spin loop
+    hammering the provider with no wait between passes. So the positivity check
+    is applied to the RESULT, after both paths converge, rather than duplicated
+    into each of them where one copy could later be forgotten (PR #4 review).
+    """
     text = text.strip()
     if text.isdigit():
-        return int(text)
-    match = _DURATION.match(text)
-    if not match:
-        raise ValueError(f"Cannot parse interval {text!r} — use e.g. 900, 30m, 6h, 1d.")
-    return int(match.group(1)) * _UNITS[match.group(2).lower()]
+        seconds = int(text)
+    else:
+        match = _DURATION.match(text)
+        if not match:
+            raise ValueError(f"Cannot parse interval {text!r} — use e.g. 900, 30m, 6h, 1d.")
+        seconds = int(match.group(1)) * _UNITS[match.group(2).lower()]
+
+    if seconds <= 0:
+        raise ValueError(f"interval must be positive, got {text!r}")
+    return seconds
 
 
 def run_scheduled(
