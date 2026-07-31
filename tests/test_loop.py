@@ -127,6 +127,58 @@ def test_memory_pressure_warning_injected(mem):
     assert mem.store.count_messages(event_types=("pressure_warning",)) == 1
 
 
+def test_hard_cap_evicts_even_when_the_model_never_offloads(mem):
+    """Paging cannot depend on the model doing as it is told.
+
+    The pressure warning ASKS the agent to offload to archival, and eviction
+    used to fire only after it complied. A model that ignores the warning grew
+    the queue for ever — the stress tier drove 100 turns to 219% of the limit
+    with zero evictions. Above hard_evict_fraction the cut happens regardless.
+    """
+    reply = lambda: result(  # noqa: E731
+        tool_calls=[tool("send_message", '{"text":"ok"}')], prompt_tokens=990
+    )
+    loop = make_loop(mem, FakeRouter([], default=reply))
+    preload = [{"role": "user", "content": f"old message {i}"} for i in range(40)]
+    loop.seed_context(messages=preload, input_tokens=990, limit=1000)  # 99%
+
+    loop.step("and another thing")
+
+    assert len(loop.messages) < 40, "the queue must shrink without an archival offload"
+    head = loop.messages[0]["content"]
+    assert "[CONTEXT EVICTED]" in head
+    assert "NOT summarized" in head, "must not claim a summary that was never written"
+    assert mem.store.count_messages(event_types=("eviction",)) == 1
+
+
+def test_a_cooperative_offload_still_reports_itself_as_summarized(mem):
+    """The forced path must not swallow the ordinary one."""
+    router = FakeRouter(
+        [
+            result(
+                tool_calls=[
+                    tool(
+                        "archival_memory_insert",
+                        '{"content":"Summary of the early turns.","source":"inferred",'
+                        '"request_heartbeat":true}',
+                    )
+                ],
+                prompt_tokens=800,
+            ),
+            result(tool_calls=[tool("send_message", '{"text":"done"}', id="c2")], prompt_tokens=800),
+        ]
+    )
+    loop = make_loop(mem, router)
+    preload = [{"role": "user", "content": f"old message {i}"} for i in range(40)]
+    loop.seed_context(messages=preload, input_tokens=800, limit=1000)  # 80%: over warn, under cap
+
+    loop.step("summarize things")
+
+    head = loop.messages[0]["content"]
+    assert "[CONTEXT EVICTED]" in head
+    assert "summarized into" in head and "NOT summarized" not in head
+
+
 def test_fifo_accumulates_across_turns_and_reset_clears_it(mem):
     reply = lambda: result(  # noqa: E731
         tool_calls=[tool("send_message", '{"text":"ok"}')], prompt_tokens=42

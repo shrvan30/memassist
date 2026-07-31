@@ -79,6 +79,9 @@ POSTGRES_DSN: str | None = os.getenv("MEMASSIST_POSTGRES_DSN") or None
 STORAGE_BACKEND: str = os.getenv(
     "MEMASSIST_STORAGE_BACKEND", "postgres" if POSTGRES_DSN else "sqlite"
 ).lower()
+# The graph checkpointer follows the storage backend (see assembly). Its pool
+# is shared by every session, so it is sized by concurrent turns, not sessions.
+CHECKPOINTER_POOL_MAX: int = int(os.getenv("MEMASSIST_CHECKPOINTER_POOL_MAX", "8"))
 
 # --- Storage locations ---------------------------------------------------
 DB_PATH: str = os.getenv("MEMASSIST_DB_PATH", str(ROOT / "data" / "memassist.db"))

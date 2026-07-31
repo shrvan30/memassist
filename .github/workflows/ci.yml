@@ -1,6 +1,8 @@
 name: ci
 on:
-  push: { branches: [main, 'phase-*'] }
+  push:
+    branches: [main, 'phase-*']
+    tags: ['v*']          # a tag additionally publishes images (see `publish`)
   pull_request:
 
 jobs:
@@ -34,6 +36,37 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # Defect #5, still on probation: one postgres leg failed with a bare
+      # "exit code 1" and passed unchanged on the next run. The service
+      # healthcheck is the runner's opinion that the container is up; this is
+      # the suite's own opinion that it can connect and run a query, taken with
+      # the same driver the tests use. If the database is not actually ready,
+      # this says so here instead of as a mystery failure 40 tests in.
+      - name: Wait for Postgres
+        if: matrix.backend == 'postgres'
+        run: |
+          python - <<'PY'
+          import sys, time
+          import psycopg
+          dsn = "postgresql://memassist:memassist@localhost:5432/memassist"
+          deadline = time.time() + 60
+          attempt = 0
+          while True:
+              attempt += 1
+              try:
+                  with psycopg.connect(dsn, connect_timeout=5) as conn:
+                      conn.execute("SELECT 1").fetchone()
+                      conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                  print(f"postgres ready after {attempt} attempt(s)")
+                  sys.exit(0)
+              except Exception as exc:
+                  if time.time() > deadline:
+                      print(f"::error title=postgres never became ready::{exc}")
+                      sys.exit(1)
+                  print(f"attempt {attempt}: {type(exc).__name__}; retrying")
+                  time.sleep(2)
+          PY
+
       - name: Lint
         if: matrix.backend == 'sqlite'
         run: ruff check .
@@ -60,7 +93,7 @@ jobs:
           fi
           exit $code
 
-      - name: Benchmark (regression gate, must stay 110/110)
+      - name: Benchmark (regression gate, must stay 115/115)
         env:
           MEMASSIST_BENCH_POSTGRES_DSN: ${{ matrix.backend == 'postgres' && 'postgresql://memassist:memassist@localhost:5432/memassist' || '' }}
         run: |
@@ -113,6 +146,58 @@ jobs:
         # Runtime deps only: dev tooling is not shipped, and a dev-only advisory
         # should not be able to block a release.
         run: npm audit --omit=dev --audit-level=high
+
+  # Publish images to GHCR — tags only, and only after BOTH test jobs are green.
+  # A tag is the release artifact, so it must never be able to ship an image
+  # that the dual-backend suite and the benchmark have not passed.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [python, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - image: memassist-api      # also runs the memory-mcp service
+            context: .
+            dockerfile: Dockerfile
+          # NEXT_PUBLIC_API_BASE is baked into the client bundle at BUILD time,
+          # so the published web image carries the Dockerfile default
+          # (http://localhost:8000). Anyone serving the API from another origin
+          # must rebuild rather than set an env var at run time.
+          - image: memassist-web
+            context: ./web
+            dockerfile: ./web/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The api image bakes bge-small into a layer, so it is worth caching.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   # Nightly smoke benchmark (real free-tier keys via repo secrets).
   # Manual trigger only until quota impact is measured.

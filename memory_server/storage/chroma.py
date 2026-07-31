@@ -24,6 +24,9 @@ from typing import Callable
 import chromadb
 from chromadb.config import Settings
 
+# Pure regex, no dependencies — the privacy gate on the Mistral lane (§P5).
+from security.sensitivity import is_sensitive
+
 from . import embedder
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -83,10 +86,27 @@ class ArchivalStore:
             metadata={"hnsw:space": "cosine"},
         )
 
-    def insert(self, content: str, source: str = "agent", created_at: str | None = None) -> str:
-        """Embed and upsert a passage with a timestamp. Returns the passage id."""
+    def insert(
+        self,
+        content: str,
+        source: str = "agent",
+        created_at: str | None = None,
+        sensitive: bool | None = None,
+    ) -> str:
+        """Embed and upsert a passage with a timestamp. Returns the passage id.
+
+        ``sensitive`` defaults to *detecting* rather than to False: the flag
+        gates what background jobs may send to Mistral, so a caller that forgets
+        to set it must fail closed. Pass True to force it.
+        """
         passage_id = uuid.uuid4().hex
-        metadata = {"created_at": created_at or _utc_now(), "source": source}
+        if sensitive is None:
+            sensitive = is_sensitive(content)
+        metadata = {
+            "created_at": created_at or _utc_now(),
+            "source": source,
+            "sensitive": bool(sensitive),
+        }
         self._col.add(
             ids=[passage_id],
             embeddings=[self._embed(content)],
@@ -124,6 +144,10 @@ class ArchivalStore:
                 "content": doc,
                 "created_at": (meta or {}).get("created_at"),
                 "source": (meta or {}).get("source"),
+                # Passages written before the flag existed have no key. False is
+                # the honest default: they were never screened, and the job's
+                # own filter re-checks content anyway (jobs/consolidate.py).
+                "sensitive": bool((meta or {}).get("sensitive", False)),
                 "distance": dist,
             }
             for pid, doc, meta, dist in zip(ids, docs, metas, dists)

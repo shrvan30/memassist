@@ -9,10 +9,16 @@ harness read exactly as before.
 Turn state lives in a LangGraph **checkpointer**, not in attributes: an
 interrupt suspends the graph mid-turn and resumes it after a human decision,
 which only works if the state it resumes into was persisted. The read
-properties below are views over the current checkpoint, and the two mutators
-(:meth:`reset`, :meth:`seed_context`) are the only way to change it — assigning
-to ``loop.messages`` would otherwise write to a throwaway copy and silently do
-nothing.
+properties below — including :attr:`pending_approval` — are views over the
+current checkpoint, and the two mutators (:meth:`reset`, :meth:`seed_context`)
+are the only way to change it; assigning to ``loop.messages`` would otherwise
+write to a throwaway copy and silently do nothing.
+
+*Which* checkpointer is an assembly decision, paired with the storage backend,
+and the loop is deliberately ignorant of it. On the Postgres backend the
+persistence is real: a turn suspended on an approval survives the process that
+suspended it, provided the caller supplies a stable ``thread_id`` so the
+rebuilt loop addresses the same thread.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from uuid import uuid4
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+import observability
 from graph import build_graph, recursion_limit
 from graph.nodes import EVENT_MESSAGE
 from graph.state import Deps, LLMRouter, MemoryInterface
@@ -41,6 +48,8 @@ class AgentLoop:
         pressure_threshold: float,
         max_heartbeats: int,
         external=None,
+        checkpointer=None,
+        thread_id: str | None = None,
     ) -> None:
         self.router = router
         self.memory = memory
@@ -59,14 +68,22 @@ class AgentLoop:
             max_heartbeats=max_heartbeats,
             external=external,
         )
-        # ponytail: InMemorySaver keeps every checkpoint for the life of the
-        # thread. reset() rotates the thread id, which is what bounds it in
-        # practice; swap for SqliteSaver when turn state has to outlive the
-        # process (Phase 4 already puts a database underneath).
-        self._graph = build_graph(self._deps, checkpointer=InMemorySaver())
+        # The checkpointer is chosen in assembly, paired with the storage
+        # backend (Postgres backend -> PostgresSaver). The default keeps turn
+        # state in-process, which is right for the benchmark and the tests:
+        # they want a clean slate per run, not durability.
+        self._checkpointer = checkpointer if checkpointer is not None else InMemorySaver()
+        self._graph = build_graph(self._deps, checkpointer=self._checkpointer)
         self._recursion_limit = recursion_limit(max_heartbeats)
-        self._pending_approval: dict | None = None
-        self._new_thread()
+        # A STABLE thread id is what makes durability work: after a restart the
+        # rebuilt loop has to address the same thread the dead process wrote,
+        # or the persisted checkpoint is unreachable and durability buys
+        # nothing. Callers with a durable identity (an API session) pass theirs.
+        self._thread_id = thread_id or uuid4().hex
+        self._config = {
+            "configurable": {"thread_id": self._thread_id},
+            "recursion_limit": self._recursion_limit,
+        }
 
     # -- state: read -------------------------------------------------------
     def _snapshot(self) -> dict:
@@ -99,20 +116,23 @@ class AgentLoop:
         )
 
     # -- state: write ------------------------------------------------------
-    def _new_thread(self) -> None:
-        self._config = {
-            "configurable": {"thread_id": uuid4().hex},
-            "recursion_limit": self._recursion_limit,
-        }
+    @property
+    def thread_id(self) -> str:
+        """The checkpointer thread this loop reads and writes."""
+        return self._thread_id
 
     def reset(self) -> None:
         """Clear the in-context window. Saved memory is untouched.
 
-        A fresh thread rather than a blanking update: it drops the accumulated
-        checkpoints too, so a long session cannot grow without bound.
+        Deletes the thread's checkpoints rather than blanking the state: it
+        drops the accumulated history too, so a long session cannot grow
+        without bound, and it clears a pending interrupt (which a state update
+        would leave scheduled). ``delete_thread`` is on the base checkpointer
+        interface, so this is one behaviour on both savers — and with a durable
+        one it matters more, since orphaned threads would otherwise be rows
+        nobody ever reads again.
         """
-        self._pending_approval = None
-        self._new_thread()
+        self._checkpointer.delete_thread(self._thread_id)
 
     def seed_context(
         self,
@@ -173,20 +193,62 @@ class AgentLoop:
     # -- human-in-the-loop -------------------------------------------------
     @property
     def pending_approval(self) -> dict | None:
-        """The gated action waiting on a human, or None (spec §4.3, §6.3)."""
-        return self._pending_approval
+        """The gated action waiting on a human, or None (spec §4.3, §6.3).
+
+        A view over the checkpoint, not an attribute. A suspended turn is only
+        durable if the *fact that it is suspended* is durable too: after a
+        restart the rebuilt loop is a new object with no memory of having asked
+        anything, and an attribute here would report "nothing pending" over a
+        graph that is still holding an interrupt.
+        """
+        interrupts = self._graph.get_state(self._config).interrupts
+        return interrupts[0].value if interrupts else None
 
     def resume(self, approved: bool) -> list[str]:
         """Answer a pending approval and run the rest of the turn."""
-        if self._pending_approval is None:
+        if self.pending_approval is None:
             return []
-        self._pending_approval = None
         return self._invoke(Command(resume=bool(approved)))
 
     def _invoke(self, payload) -> list[str]:
-        final = self._graph.invoke(payload, self._config)
-        # A turn that hit interrupt() comes back carrying the request instead of
-        # having finished. Everything already delivered this turn still stands.
-        pending = final.get("__interrupt__")
-        self._pending_approval = pending[0].value if pending else None
-        return final.get("final_reply", [])
+        # Everything already delivered this turn stands even if the turn then
+        # suspends; the interrupt itself is read back off the checkpoint.
+        with observability.span(
+            "turn", as_type="agent", input=_trace_input(payload)
+        ) as turn:
+            final = self._graph.invoke(payload, self._config)
+            summary = observability.summarize_turn(final)
+            if turn is not None:
+                turn.update(output={"replies": len(final.get("final_reply") or [])},
+                            metadata=summary)
+            observability.update_trace(
+                turn,
+                session_id=self._thread_id,
+                # Tags are what make a trace findable: "show me every turn where
+                # the guards fired" is the question this exists to answer.
+                tags=_trace_tags(summary),
+            )
+            return final.get("final_reply", [])
+
+
+def _trace_input(payload) -> dict:
+    """Only the new user text, never the accumulated FIFO — the window is
+    re-sent every heartbeat and would dominate the trace with duplicates."""
+    if not isinstance(payload, dict):
+        return {"resume": True}
+    messages = payload.get("messages") or []
+    last = messages[-1] if messages else {}
+    return {"user": last.get("content", ""), "context_messages": len(messages)}
+
+
+def _trace_tags(summary: dict) -> list[str]:
+    tags = [f"provider:{summary.get('served_by') or 'none'}"]
+    if summary.get("saw_untrusted"):
+        tags.append("untrusted-content")
+    if summary.get("injection_flags"):
+        tags.append("injection-flagged")
+    if summary.get("blocked_tools"):
+        tags.append("guard-denied")
+    if summary.get("interrupted"):
+        tags.append("interrupted")
+    return tags

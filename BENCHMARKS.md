@@ -2,14 +2,16 @@
 
 ## How to run
 ```
-make bench              # deterministic suite, 110 points
+make bench              # deterministic suite, 115 points
 make bench LIVE=1       # + real-provider smoke (reported, never scored)
+make stress             # unscored stress tier (see the end of this file)
 python -m bench --json out.json
 ```
 
 ## Scoring model
-Ceiling is **110** from Phase 3 (T11 added, +10). Runs before that scored out
-of 100 — the T1–T8 subtotal is the comparable number across the whole log.
+Ceiling is **115** from Phase 5 (T10 added, +5); it was 110 from Phase 3 (T11,
++10). Runs before that scored out of 100 — the T1–T8 subtotal is the comparable
+number across the whole log.
 
 The suite is **deterministic and offline**: every provider call is a scripted
 fake, and every check gets a fresh temp SQLite + Chroma directory. The score is
@@ -30,6 +32,7 @@ one tier:
 | T6 | Tool dispatch safety | 10 | — |
 | T7 | Resilience & degradation | 10 | fix 4 — friendly exhaustion (T7c) |
 | T8 | Provenance | 10 | fix 5 — source tags |
+| T10 | Background consolidation & the privacy gate | 5 | Phase 5 — Mistral lane |
 | T11 | Prompt injection & memory poisoning | 10 | Phase 3 — security layer |
 
 > **This scale is NOT the Phase 1 "79/100".** That harness and its BENCHMARKS.md
@@ -330,3 +333,164 @@ stricter, not easier, and it can no longer go stale when the prompt changes.
 
 No tier regressed at any step. The Phase 2 and Phase 3 refactors were both
 gated on T1–T8 holding at 100.
+
+---
+
+## Phase 5 — background lane, durability, observability
+
+**115 / 115** on BOTH storage backends (T1–T8 100, T10 5, T11 10) ·
+`pytest`: 236 passed (postgres) / 216 passed + 20 skipped (sqlite)
+
+### T10 — Background consolidation & the privacy gate (5)
+
+The lane is small; the gate in front of it is the tier. Mistral's free tier
+trains on prompts, so consolidation sends content the user is not watching go
+out, to a model that keeps it.
+
+| Check | Pts | What must hold |
+|---|---|---|
+| T10a | 3 | Secrets, card numbers, verbatim external tool results, untrusted-marker echoes and security-audit rows are all absent from the outbound payload — while ordinary conversation still goes through. A gate that withholds everything is not a gate, it is an outage |
+| T10b | 1 | Routes to the `background` lane only, never the interactive chain; the summary lands in archival tagged `source=consolidation` |
+| T10c | 1 | An all-sensitive window spends **zero** provider requests; and a secret the *model* invented in its own summary is stored flagged, so the next pass excludes it |
+
+### Two findings
+
+**`card-number` had never worked.** The Luhn gate stripped the digits from the
+match instead of the separators, so what it length-checked was `"  "` — never
+13 characters, so every candidate was rejected as a non-card. It looked healthy
+because the only form under test, `4111 1111 1111 1111`, *also* matches the
+`aadhaar` pattern and was withheld by that instead. The unspaced
+`4111111111111111` matched nothing at all and would have been sent to Mistral.
+Found by reading the live run's withholding reasons and noticing the category
+was wrong — the outcome was right, which is exactly how it survived. This is
+the argument for reporting withheld counts *by category* rather than as a
+total.
+
+**The bench tier parser would have swallowed T10.** `check()` derived the tier
+with `cid[:2]` and special-cased `T11`, so `T10a` filed itself under `T1`. A
+new tier would have silently inflated an old one. Now parsed as `^T\d+`.
+
+### Live verification
+
+Required by the phase brief, and it earned its keep — it is where the
+`card-number` bug surfaced. One real call, throwaway store, real endpoint:
+
+```
+RESULT: considered=8 sent=3 withheld[external content]=1
+        withheld[non-message event]=2 withheld[sensitive:aadhaar]=1
+        withheld[sensitive:api-key]=1 served_by=mistral passage=c1808c47…
+SUMMARY STORED: 'Mira born in 2019\nWorks as a nurse at Ruby Hall in Pune'
+--- OUTBOUND LEAK CHECK ---
+  api key                  absent  OK
+  card number              absent  OK
+  external tool result     absent  OK
+  untrusted marker echo    absent  OK
+  security audit row       absent  OK
+  safe content present     yes OK
+LIVE T10 VERIFICATION: PASS (served_by=mistral)
+```
+
+---
+
+## Stress tier — UNSCORED
+
+`make stress` (or `python -m bench --stress`). Four scenarios that measure
+behaviour under load rather than correctness of a mechanic.
+
+**Why unscored.** These numbers move with the machine, the embedding model and
+the free tier's mood. Scoring them would corrupt the one guarantee the 115-point
+suite has — that a score delta is attributable to a source change and nothing
+else. So the stress tier reports and a human reads it.
+
+Run on both backends; the numbers below are identical on each except for
+latency, which is the only thing the storage layer touches here.
+
+### S1 — 100-turn session coherence
+
+```
+turns                 100 (2.8s, 110 model calls)
+in-context queue      108 messages (high water 174)
+peak context usage    95% of the 8000-token limit
+evictions fired       3
+recall log            256 events
+early facts retrieved 10/10 after 90 intervening turns
+```
+
+**This scenario found the one real defect of the phase.** On its first run:
+
+```
+in-context queue      382 messages (high water 382)
+peak context usage    219% of the 8000-token limit
+evictions fired       0
+```
+
+Eviction fired only on the path `offloaded and under_pressure` — that is, only
+after the *model* answered the pressure warning by calling
+`archival_memory_insert`. A model that ignores the warning grew the queue
+without bound. README defect #3 ("memory pressure warns but never evicts") was
+recorded as fixed in Phase 1.5; only the cooperative half was.
+
+Paging is a safety property and cannot be contingent on the model doing as it
+is told, so `Deps.hard_evict_fraction` (0.95) now forces the cut regardless. The
+forced path leaves a *different* notice — the messages were not summarized, and
+telling the model they were is a lie it then acts on. Nothing is lost either
+way: recall has had every message since it arrived.
+
+Retrieval of the ten early facts was 10/10 both before and after, so the fix
+bounded the window without costing recall.
+
+### S2 — 50-fact retrieval precision
+
+```
+passages              50 (1.3s to embed and insert)
+precision@1           42/50 (84%)
+precision@3           47/50 (94%)
+query latency         38 ms/probe   (48 ms on SQLite+Chroma)
+```
+
+T5 scores four paraphrase probes against a four-passage store, where almost
+anything ranks first. At fifty facts, bge-small holds 84% at rank 1 and 94% in
+the top 3. The failures are instructive and all of one kind — the probe is
+closer to a *neighbouring* fact in the same semantic field:
+
+- `'which medication makes them unwell'` → *"blood group is O negative"* (both medical)
+- `'what vehicle do they own'` → *"car insurance is with Bajaj"* (both automotive)
+- `'where was their child delivered'` → *"works as a paediatric nurse"* (both children)
+- `'how do they prepare their morning drink'` → *"runs on Tuesday mornings"* ("morning")
+
+Two of the fifty miss the top 3 entirely. This is a fair characterisation of a
+384-d model on short passages, not a bug: `archival_top_k` defaults to 5, so
+94%-in-3 means the agent almost always *sees* the right passage. Denser
+passages or a reranker would be the next lever, and neither is a v1 concern.
+
+### S3 — 20 messages under provider cooldowns
+
+```
+turns                 20 in 0.9s (44 ms/turn)
+replies delivered     20/20
+served_by             gemini=14, groq=3, openrouter=3
+turns left unanswered 0
+recall continuity     40 messages logged
+```
+
+Priority 1 unavailable for the first six turns and priority 2 dead across an
+overlapping window, so turns 3–5 have only the lower-priority lanes. Every turn
+was answered, and the recall log has both halves of all twenty exchanges — the
+failover is invisible to the user except in the `served_by` badge, which is the
+whole design intent.
+
+### S4 — 10-page document, recalled 20 turns later
+
+```
+document              10 pages, ~679 words, 10 passages
+intervening turns     20 (in-context queue now 60)
+where do I turn off the water in an em   needle at rank 1
+which panel hides the shut-off valve     needle at rank 1
+B-14                                     needle at rank 1
+```
+
+One specific fact buried in the middle of otherwise-uniform filler, then twenty
+unrelated turns. Retrieved at rank 1 by all three probes, including the bare
+identifier `B-14` — lexical and semantic probes both land. The filler is varied
+rather than repeated on purpose: identical paragraphs collapse to identical
+embeddings and would have made this look better than it is.
