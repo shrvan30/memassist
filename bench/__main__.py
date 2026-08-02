@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -921,6 +922,176 @@ def t10c_nothing_sendable_spends_no_request(tmp):
     if not items or items[0].get("sensitive") is not True:
         return False, "a secret in the SUMMARY was stored unflagged"
     return True, "0 requests; self-inflicted secret stored flagged"
+
+
+# =========================================================================
+# T12 — Memory utilization (10). LIVE: needs a provider key.
+# =========================================================================
+# T1-T11 are offline and deterministic: every model call is a scripted fake, so
+# the score reproduces anywhere. T12 cannot work that way. It grades whether the
+# agent ANSWERS from what it retrieved instead of asking the user to repeat it,
+# and that is a decision the model makes — scripting the reply would grade this
+# file's fixtures, not the agent.
+#
+# So T12 makes real calls, and is only registered when a key for the pinned
+# provider is present. Without one the tier does not exist and the ceiling is
+# 115, which keeps CI (no keys) reproducible and green. The GRADING is
+# deterministic: given a reply, the verdict is a pure function of its text.
+T12_PROVIDER = os.getenv("MEMASSIST_BENCH_T12_PROVIDER", "openrouter")
+T12_POINTS = {"T12a": 4, "T12b": 3, "T12c": 3}
+
+# Phrases that count as attributing an answer to stored memory. Broad on
+# purpose: the instruction asks for attribution, not for one wording.
+_ATTRIBUTION = (
+    "you told me", "you mentioned", "you said", "our conversation", "we discussed",
+    "from your", "in your notes", "you noted", "earlier", "previously", "back in",
+    "according to my memory", "i have stored", "my memory", "you set", "you described",
+)
+_DATE_RE = re.compile(r"\b(20\d\d|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)", re.I)
+
+
+def _t12_key_present() -> bool:
+    from llm.router import load_providers, resolve_api_key
+
+    for cfg in load_providers(config.PROVIDERS_YAML):
+        if cfg.name == T12_PROVIDER:
+            return bool(resolve_api_key(cfg.api_key_env))
+    return False
+
+
+def _t12_router():
+    """A router pinned to ONE provider at temperature 0.
+
+    Pinned because failover would silently change which model is being graded,
+    and a tier that measures instruction-following must not move between models
+    mid-run. Temperature 0 to keep replies as stable as the provider allows.
+    """
+    from llm.budgets import BudgetLedger
+    from llm.router import OpenAIChatClient, Router, load_providers
+
+    cfgs = [c for c in load_providers(config.PROVIDERS_YAML) if c.name == T12_PROVIDER]
+    if not cfgs:
+        raise RuntimeError(f"T12 provider {T12_PROVIDER!r} is not in providers.yaml")
+    tmp = Path(tempfile.mkdtemp(prefix="bench_t12_ledger_"))
+    return Router(
+        cfgs,
+        BudgetLedger(str(tmp / "ledger.db")),
+        client_factory=lambda cfg, key: OpenAIChatClient(cfg.base_url, key),
+        temperature=0.0,
+    )
+
+
+def _t12_turn(mem, question: str, attempts: int = 3, pause: float = 20.0) -> str:
+    """Run one real turn with the real tool schemas and return the reply.
+
+    Retries when every provider is exhausted. A 429 means the free tier is busy,
+    not that the agent failed to use its memory — scoring one as the other would
+    measure the wrong thing. Retries are bounded and the last reply is returned
+    either way, so a genuinely dead provider still fails the check rather than
+    hanging.
+    """
+    from graph.nodes import PROVIDERS_EXHAUSTED_MESSAGE
+    from memory_server.schemas import ALL_TOOLS
+
+    reply = ""
+    for attempt in range(attempts):
+        loop = AgentLoop(
+            _t12_router(),
+            mem,
+            tools=ALL_TOOLS,
+            planning_context_limit=100_000,
+            pressure_threshold=0.7,
+            max_heartbeats=5,
+        )
+        reply = " ".join(loop.step(question)).strip()
+        if PROVIDERS_EXHAUSTED_MESSAGE[:40] not in reply:
+            return reply
+        if attempt < attempts - 1:
+            time.sleep(pause)
+    return reply
+
+
+def _t12_verdict(reply: str, must_mention, want_attribution: bool):
+    """Deterministic grading. Returns (passed, note).
+
+    Form is graded as well as content: a reply that supplies none of the stored
+    substance and instead asks the user for it scores zero, which is the whole
+    point of the tier.
+    """
+    if not reply:
+        return False, "empty reply"
+    low = reply.lower()
+    missing = [m for m in must_mention if not any(v in low for v in m)]
+    if missing:
+        shape = "ASKED THE USER" if "?" in reply else "no answer"
+        return False, f"{shape}; missing {missing[0][0]!r} — {reply[:70]!r}"
+    if want_attribution and not (
+        any(a in low for a in _ATTRIBUTION) or _DATE_RE.search(reply)
+    ):
+        return False, f"answered but did not attribute — {reply[:70]!r}"
+    return True, reply[:88].replace("\n", " ")
+
+
+def t12a_answers_without_the_users_keyword(tmp):
+    """A plan the user never called a "goal", asked about as their "goal"."""
+    mem = make_memory(tmp)
+    episode = (
+        "Over the next three months I'm running a lean bulk: about 300 calories "
+        "above maintenance, 1.6 g of protein per kg of bodyweight, and lifting "
+        "four days a week. I started on 1 June 2026."
+    )
+    mem.record_event("user", "message", episode)
+    mem.archival.insert(episode, source="stated")
+
+    reply = _t12_turn(mem, "what is my 3 month goal?")
+    return _t12_verdict(
+        reply,
+        must_mention=[("lean bulk", "bulk"), ("three month", "3 month", "3-month")],
+        want_attribution=True,
+    )
+
+
+def t12b_reasons_about_a_passed_deadline(tmp):
+    """The user speaks from a date later than a stored deadline."""
+    mem = make_memory(tmp)
+    episode = "The VidRAG project deliverable is due on 30 August 2026."
+    mem.record_event("user", "message", episode)
+    mem.archival.insert(episode, source="stated")
+
+    reply = _t12_turn(mem, "it's mid-September now — what did I miss?")
+    return _t12_verdict(
+        reply,
+        must_mention=[
+            ("vidrag",),
+            ("30 august", "aug 30", "august 30", "30th of august"),
+            ("passed", "missed", "overdue", "past", "late", "elapsed", "deadline was"),
+        ],
+        want_attribution=False,
+    )
+
+
+def t12c_answers_a_paraphrased_probe(tmp):
+    """A stated goal, probed in words the user never used."""
+    mem = make_memory(tmp)
+    episode = "I'm aiming to read 24 books this year — two a month."
+    mem.record_event("user", "message", episode)
+    mem.archival.insert(episode, source="stated")
+
+    reply = _t12_turn(mem, "how many books am I trying to get through?")
+    return _t12_verdict(
+        reply, must_mention=[("24", "twenty-four")], want_attribution=True
+    )
+
+
+# Registered only when the pinned provider has a key — see the note above.
+if _t12_key_present():
+    TIER_NAMES["T12"] = "Memory utilization (live)"
+    for _cid, _fn in (
+        ("T12a", t12a_answers_without_the_users_keyword),
+        ("T12b", t12b_reasons_about_a_passed_deadline),
+        ("T12c", t12c_answers_a_paraphrased_probe),
+    ):
+        CHECKS.append(("T12", _cid, T12_POINTS[_cid], _fn))
 
 
 # --- live smoke (not scored) ---------------------------------------------
