@@ -158,6 +158,11 @@ jobs:
       contents: read
       packages: write
     strategy:
+      # The two images are independent artifacts. With fail-fast (the default),
+      # web failing in 11s cancelled the api build mid-flight, so one broken
+      # image took down a release that was otherwise fine — and hid whether the
+      # api leg would have succeeded at all.
+      fail-fast: false
       matrix:
         include:
           - image: memassist-api      # also runs the memory-mcp service
@@ -173,6 +178,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # REQUIRED for the cache-to below, and the reason the v1.0.0 tag run died.
+      # Without this the build uses the runner's default builder, which is on
+      # the `docker` driver. That driver only supports cache export when the
+      # containerd image store is enabled, and it is not on GitHub runners — so
+      # buildx refused with "Cache export is not supported for the docker
+      # driver" before it ever reached the registry. This action creates a
+      # `docker-container` builder, which supports cache export unconditionally.
+      - uses: docker/setup-buildx-action@v3
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -183,10 +197,20 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          # `latest=auto` (the default, stated here because it bit us) already
+          # adds :latest for a non-prerelease semver tag. An explicit
+          # `type=raw,value=latest` on top of it emitted the tag TWICE —
+          # visible in the failed run as a duplicated --tag argument. Auto is
+          # also the behaviour we actually want: a v1.1.0-rc1 must not become
+          # :latest, which a raw entry would have made it.
+          flavor: latest=auto
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+          # The repository has no description set, so metadata-action emitted an
+          # empty one. A published image should say what it is.
+          labels: |
+            org.opencontainers.image.description=A MemGPT-style personal assistant with infinite memory, running at $0/month
 
       - uses: docker/build-push-action@v6
         with:
