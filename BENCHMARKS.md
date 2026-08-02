@@ -2,10 +2,14 @@
 
 ## Result
 
-**115 / 115 on both storage backends** — SQLite + Chroma and Postgres + pgvector
-score identically, which is the point of running both. `pytest`: 247 passed
-(Postgres) / 227 passed + 20 skipped (SQLite, where the Postgres tests skip
+**125 / 125 on both storage backends** — SQLite + Chroma and Postgres + pgvector
+score identically, which is the point of running both. `pytest`: 251 passed
+(Postgres) / 231 passed + 20 skipped (SQLite, where the Postgres tests skip
 rather than silently pass).
+
+Of that, **115 points are offline and deterministic** and 10 (T12) require a
+live provider; without a provider key T12 is not registered and the run scores
+out of 115.
 
 ```bash
 make bench              # the scored suite
@@ -28,16 +32,50 @@ python -m bench --json out.json
 | T8 | Provenance: `stated` vs `inferred` recorded correctly on both core and archival writes | 10 |
 | T10 | Background consolidation: the privacy filter holds, the lane stays on Mistral, an all-sensitive window spends zero requests | 5 |
 | T11 | Prompt injection and memory poisoning: web content cannot write core memory, instructions are neutralized, filesystem writes are gated | 10 |
-| | **Total** | **115** |
+| T12 | Memory utilization — see below. **Live, not part of the deterministic suite** | 10 |
+| | **Total** | **125** |
 
 T9 does not exist; the numbering left room for a tier that was never needed.
 
+## T12 — memory utilization (live)
+
+Whether the agent *answers* from what it retrieved instead of asking the user to
+repeat it. One line per case:
+
+| Case | Setup and probe | Pass | Pts |
+|---|---|---|---|
+| T12a | A three-month plan the user never called a "goal"; asked "what is my 3 month goal?" | States the plan, attributed. Asking the user scores zero | 4 |
+| T12b | "VidRAG due 30 August"; asked "it's mid-September, what did I miss?" | Names the deadline and says it has passed, relative to the date the user gave | 3 |
+| T12c | A stated goal, probed in words the user never used | Answers with provenance and no counter-question | 3 |
+
+**This tier is not deterministic, and cannot be.** T1–T11 drive scripted fake
+routers; a scripted T12 reply would grade the harness's own fixtures rather than
+the agent, because what is being measured is a decision the model makes. So T12
+issues real requests against one pinned provider
+(`MEMASSIST_BENCH_T12_PROVIDER`, default `openrouter`) at temperature 0. The
+grading is deterministic — given a reply, the verdict is a pure function of its
+text — but the reply is not.
+
+The provider is pinned rather than allowed to fail over, since failover would
+change which model is being graded partway through a run. Provider exhaustion is
+retried with a pause: a 429 means the free tier is busy, not that the agent
+failed to use its memory.
+
+**T12 is registered only when the pinned provider has a key.** Without one the
+tier does not exist and the ceiling is 115, so CI — which holds no keys — stays
+offline, reproducible, and green. A local run with keys scores out of 125.
+
+Because the score depends on the pinned model's instruction-following, T12 is a
+measurement of the whole system rather than of the memory layer alone. Treat a
+T12 regression as a prompt or model question first.
+
 ## Method
 
-The scored suite is deterministic and offline. Every provider call is a scripted
-fake and every check gets a fresh temporary store, so the number reproduces on
-any machine and a change in it is attributable to a change in the source. It
-runs in CI against both backends and fails the build below 115.
+T1–T11 are deterministic and offline. Every provider call is a scripted fake
+and every check gets a fresh temporary store, so the number reproduces on any
+machine and a change in it is attributable to a change in the source. They run
+in CI against both backends and fail the build below 115. T12 is the exception
+and is described above.
 
 `LIVE=1` adds one real request per configured provider. Those results are
 printed but never scored, because free-tier availability varies by the hour and
