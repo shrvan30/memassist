@@ -5,8 +5,9 @@
 data/
 data.bak/
 
-# Machine-local Claude Code settings (shared settings live in .claude/settings.json)
-.claude/settings.local.json
+# Local tooling config and notes — kept on disk, not part of the project
+.claude/
+CLAUDE.md
 
 # Python
 __pycache__/

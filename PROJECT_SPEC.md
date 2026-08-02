@@ -132,7 +132,7 @@ sensitive: bool}. pgvector dims = 384 (bge-small).
 ## 9. Repo layout
 ```
 memassist/
-  CLAUDE.md PROJECT_SPEC.md ARCHITECTURE.md BENCHMARKS.md .mcp.json
+  README.md PROJECT_SPEC.md ARCHITECTURE.md BENCHMARKS.md CHANGELOG.md
 + mcp_servers.yaml            # external tool registry (§5.1)
   llm/       router.py providers.yaml budgets.py errors.py
   agent/     loop.py (thin adapter) prompts.py token_budget.py
