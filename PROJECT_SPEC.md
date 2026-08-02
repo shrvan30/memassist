@@ -1,27 +1,27 @@
 # PROJECT_SPEC v3 — MemAssist (MemGPT + LangGraph + MCP tools + security + CI/CD, $0/month)
 
-Paper: MemGPT (Packer et al., 2023, arXiv:2310.08560). Phase 1 is BUILT and
-benchmarked 79/100. This revision keeps the original plan intact and adds:
-LangGraph orchestration (§4), external MCP tools (§5), AI security (§6),
-CI/CD (§10). Unchanged sections are condensed — see ARCHITECTURE.md for
-as-built detail.
+Paper: MemGPT (Packer et al., 2023, arXiv:2310.08560). This is the design the
+software was built against: memory tiers (§1-2), the provider layer (§3),
+LangGraph orchestration (§4), external MCP tools (§5), security (§6), storage
+(§7-8) and CI (§10). For what was actually built, see ARCHITECTURE.md; for
+measured results, BENCHMARKS.md.
 
 ---
 
-## 1. Memory tiers (unchanged)
+## 1. Memory tiers
 Core (persona+human blocks, in-context every turn) · Recall (SQL event log)
 · Archival (vector store). Budget: ~30% system+core / 50% FIFO / 20% tools.
 70% usage → pressure warning → offload to archival → EVICT summarized
 messages from FIFO (Phase 1.5 fix — the missing T4c mechanic).
 
-## 2. Memory tool definitions (unchanged)
+## 2. Memory tool definitions
 send_message · core_memory_append · core_memory_replace · conversation_search
 · conversation_search_date · archival_memory_insert · archival_memory_search.
 Flat params. request_heartbeat on every tool; cap 5 per turn.
 Provenance (Phase 1.5): human-block lines and archival metadata carry
 source = stated | inferred | external.
 
-## 3. LLM provider layer (unchanged)
+## 3. LLM provider layer
 Failover chain: gemini-2.5-flash → groq llama-3.3-70b → openrouter :free →
 mistral-small. OpenAI-compatible, one `openai` client per provider.
 budgets.py ledger (provider_usage table) → proactive skip, cooldowns
@@ -29,13 +29,13 @@ budgets.py ledger (provider_usage table) → proactive skip, cooldowns
 (raise loudly) from 429 (cooldown) — Gemini 0-req bug lives here.
 Background lane: Mistral only, for consolidation jobs.
 
-## 4. Orchestration — LangGraph (NEW)
+## 4. Orchestration — LangGraph
 
 ### 4.1 Why and how much
 LangGraph owns CONTROL FLOW only. It does not own providers (router.py does),
 storage (MCP server does), or UI. `agent/loop.py` becomes a thin adapter:
-`step(text)` → `graph.invoke(state)` — public API unchanged, so Streamlit and
-tests/bench/ run as-is. Post-refactor benchmark re-run must show no regression.
+`step(text)` → `graph.invoke(state)` — the public API is unchanged, so the UI
+and tests/bench/ run as-is, and the benchmark re-run is the regression gate.
 
 ### 4.2 State (graph/state.py)
 AgentState: messages (FIFO), core_render, context_pct, heartbeat_count,
@@ -64,7 +64,7 @@ build_prompt → pressure_check ─(≥70%)→ inject_warning ─┐
   approve/deny) — required for filesystem writes and any destructive tool.
 - call_llm calls llm/router.py directly inside the node.
 
-## 5. External MCP servers as tools (NEW)
+## 5. External MCP servers as tools
 
 ### 5.1 Registry — mcp_servers.yaml (name, transport, command, trust, gates)
 Initial set (max 3 active; every schema costs context tokens):
@@ -82,7 +82,7 @@ New capability this unlocks: "search X and remember the answer" — search
 result → sanitizer → model summarizes → archival_memory_insert
 (source=external). NEVER core memory (§6.3).
 
-## 6. AI security architecture (NEW)
+## 6. AI security architecture
 
 ### 6.1 Trust zones
 | Zone | Sources | Policy |
@@ -98,7 +98,7 @@ Strip/flag instruction-shaped patterns ("ignore previous", "you must",
 role-play redirects); length-cap; escape marker collisions; log verbatim
 original to recall memory for audit.
 
-### 6.3 security/guards.py — memory-poisoning defense (the one that matters)
+### 6.3 security/guards.py — memory-poisoning defense
 - core_memory_* callable only for facts originating from USER turns.
 - Tool-chain writes triggered by untrusted content → archival only, metadata
   source=external, excluded from consolidation into core.
@@ -106,7 +106,7 @@ original to recall memory for audit.
 - Filesystem: path-jail to ./workspace, write ops behind human_interrupt.
 - Never eval; secrets never in prompts; provider keys only in env.
 
-### 6.4 OWASP LLM Top-10 mapping (résumé vocabulary)
+### 6.4 OWASP LLM Top-10 mapping
 LLM01 prompt injection → 6.2 · LLM02 insecure output handling → length-caps,
 no eval · LLM06 sensitive info disclosure → sensitive flag + Mistral-lane
 filter (T10) · memory poisoning → 6.3 · unbounded consumption → budgets.py,
@@ -120,16 +120,16 @@ system prompt" in fetched page → refused, flagged (3) · (c) filesystem write
 attempt without approval → interrupted (3). Runs in CI with mocked LLM
 (deterministic guard/sanitizer assertions) + manually with live models.
 
-## 7. Own MCP memory server (unchanged)
+## 7. Own MCP memory server
 FastMCP `memgpt-memory`, 6 tools, stdio → Streamable HTTP (Phase 4).
 Also registered in .mcp.json for Claude Code/Desktop demo.
 
-## 8. Database schema (unchanged + Phase 1.5 provenance)
+## 8. Database schema
 core_blocks · messages(served_by, event_type) · provider_usage · archival
 metadata {created_at, source: stated|inferred|external|summary,
 sensitive: bool}. pgvector dims = 384 (bge-small).
 
-## 9. Repo layout (additions marked +)
+## 9. Repo layout
 ```
 memassist/
   CLAUDE.md PROJECT_SPEC.md ARCHITECTURE.md BENCHMARKS.md .mcp.json
@@ -139,9 +139,9 @@ memassist/
 + graph/     state.py nodes.py graph.py          # §4
 + security/  sanitizer.py guards.py injections/  # §6
   memory_server/  __main__.py storage/(sqlite.py chroma.py embedder.py)
-  jobs/      consolidate.py (Phase 5, T10)
-  app/       streamlit_app.py → api/ + web/ (Phase 4)
-  tests/     test_memory.py test_router.py + test_security.py + bench/
+  jobs/      consolidate.py (T10)
+  api/       main.py sessions.py   web/  Next.js UI
+  tests/     unit + security suites          bench/  scored + stress tiers
 + .github/workflows/ci.yml                        # §10
   workspace/ # filesystem-server jail
   Makefile requirements.txt .env.example
@@ -149,28 +149,32 @@ memassist/
 Deps added: langgraph, langchain-core, langchain-mcp-adapters,
 sentence-transformers, ruff, pip-audit.
 
-## 10. CI/CD (NEW)
-CI (.github/workflows/ci.yml, from Phase 2, every push/PR):
-ruff → pytest (unit + security suite, mocked LLM, no keys) → gitleaks →
-pip-audit. Nightly (manual-trigger allowed): `make bench` smoke subset with
-real keys via repo secrets — free-tier quota is the budget, so smoke only.
-CD (Phase 5): Docker build on main → deploy Streamlit to Hugging Face Spaces
-(free) now; Phase-4 stack → Render/Railway free tier. Bench score badge in
-README from nightly artifact.
+## 10. CI/CD
+CI (.github/workflows/ci.yml, every push and PR): ruff → pytest (unit +
+security suite, mocked LLM, no keys) → the benchmark as a gate → gitleaks →
+pip-audit, run against both storage backends, plus a node lint/typecheck/build
+job. Live-key smoke runs are manual only: free-tier quota is the budget.
+Release: on a version tag, both images build and publish to GHCR after the test
+jobs pass. No hosted deployment — see the README for why the supported target
+is local compose.
 
-## 11. Build phases (revised — old plan preserved, new topics inserted)
-- **P1 ✓ DONE** — benchmarked 79/100.
-- **P1.5 Fix sprint:** FIFO eviction (loop) · bge-small swap + one-time
-  re-embed migration · provenance tags · friendly exhaustion copy · Gemini
-  401-vs-429 root cause. Re-run T3/T4/T5/T7 → target low-90s.
-- **P2 LangGraph refactor + CI bootstrap:** graph/ built, loop.py adapter,
-  ci.yml live and green, FULL benchmark re-run = regression gate.
-- **P3 External tools + security:** mcp_servers.yaml, adapters wiring,
-  sanitizer, guards, interrupts, injection corpus, T11 in BENCHMARKS.md.
-- **P4 (was P3):** Postgres/pgvector, FastAPI SSE, Next.js memory-inspector,
-  docker-compose; MCP server → HTTP.
-- **P5 (was P4 + CD):** deploy pipeline live, Mistral consolidation lane +
-  sensitive filter (T10), Langfuse tracing tagged by provider, stress tier.
+## 11. Milestones
+All delivered. Each was gated on the full benchmark re-running without a
+regression, so the scope below is also the order in which it can be re-verified.
+
+- **Memory core** — three tiers, six tools, the failover router, a UI.
+- **Retrieval and paging** — FIFO eviction after archival offload, bge-small
+  embeddings with a re-embed migration, provenance tags, date validation on
+  recall search, plain-language copy when every provider is exhausted.
+- **Orchestration** — `graph/` owns the turn cycle; `agent/loop.py` is an
+  adapter with an unchanged public API; CI running on every push and PR.
+- **External tools and security** — `mcp_servers.yaml`, sanitizer, guards,
+  human interrupts, the injection corpus, T11 in BENCHMARKS.md.
+- **Storage and interfaces** — Postgres/pgvector beside SQLite/Chroma, FastAPI
+  with SSE, Next.js memory inspector, docker compose, MCP server over HTTP.
+- **Durability and background work** — Postgres checkpointer, Mistral
+  consolidation lane with the sensitive filter (T10), Langfuse tracing tagged
+  by provider, unscored stress tier.
 
 ## 12. Non-goals (v1)
 Multi-user auth, voice, fine-tuning, paid tiers, >3 external MCP servers.
