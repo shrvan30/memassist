@@ -19,7 +19,18 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # HOST side only — 15432, not 5432. 5432 is the single most contended port
+      # on a developer machine: a native Postgres install, or any other compose
+      # stack with `restart: always`, claims it the moment the daemon starts,
+      # and `docker compose up` then dies on "port is already allocated" before
+      # anything else can go wrong. A first run should not begin by debugging
+      # someone else's database.
+      #
+      # Nothing INSIDE the network changes: the other services still reach this
+      # container as postgres:5432, because that is the container port on the
+      # right-hand side. Only host tooling (psql, pgAdmin, MEMASSIST_POSTGRES_DSN
+      # from outside a container) uses the left-hand one.
+      - "${POSTGRES_HOST_PORT:-15432}:5432"
     healthcheck:
       # -d as well as -U: pg_isready reports ready while the *initdb* pass is
       # still running, and the app would then connect to a database that does
@@ -135,6 +146,20 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    # The other three services have probes and this one did not, so `up` could
+    # report the stack ready while the only part a human actually opens was
+    # still booting — and `docker compose ps` had no way to ever say otherwise.
+    # wget, not curl: this image is Alpine-based and carries busybox wget only.
+    # 127.0.0.1, not localhost: Next.js listens on 0.0.0.0:3000 (IPv4 only),
+    # while /etc/hosts maps localhost to BOTH 127.0.0.1 and ::1. busybox wget
+    # tries ::1 first and gets "connection refused" from a server that is
+    # perfectly healthy — the probe fails forever while the site serves fine.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
 
 volumes:

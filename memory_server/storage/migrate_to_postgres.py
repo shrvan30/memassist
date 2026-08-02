@@ -1,7 +1,11 @@
 """One-time migration: SQLite + Chroma → Postgres + pgvector (spec §8).
 
     python -m memory_server.storage.migrate_to_postgres \\
-        --dsn postgresql://memassist:memassist@localhost:5432/memassist
+        --dsn postgresql://memassist:memassist@localhost:15432/memassist
+
+This runs on the HOST, so the port is the host-side one the compose file
+publishes (POSTGRES_HOST_PORT, default 15432) — not the 5432 that services
+inside the compose network use.
 
 Copies core blocks, the recall log, the provider-usage ledger, and archival
 passages. Archival vectors are **re-embedded from the stored text** rather than

@@ -90,7 +90,9 @@ or not — paging is a safety property and cannot depend on the model complying
 - `python -m jobs.consolidate --dry-run` — show the outbound payload, send
   nothing. `docker compose --profile jobs up` runs it on a schedule.
 - Dual-backend runs: `MEMASSIST_TEST_POSTGRES_DSN=… pytest` and
-  `MEMASSIST_BENCH_POSTGRES_DSN=… python -m bench`
+  `MEMASSIST_BENCH_POSTGRES_DSN=… python -m bench`. Against the compose
+  database the host port is **15432**, not 5432 (`POSTGRES_HOST_PORT`) — 5432 is
+  too commonly owned by a native Postgres or another stack.
 - Lint/audit as CI runs them: `ruff check .` · `pip-audit -r requirements.txt
   --ignore-vuln PYSEC-2026-311` (chromadb: server-only RCE, no fix released,
   we run it embedded)

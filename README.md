@@ -57,6 +57,14 @@ a fresh `up` cannot race Postgres. The first build takes a few minutes: the
 image bakes the embedding model into a layer, so container *start* never waits
 on a download.
 
+**Ports it takes on your machine:** `3000` (web), `8000` (api), `8090`
+(memory-mcp) and **`15432`** for Postgres. That last one is deliberately not the
+usual 5432 — a native Postgres install, or any other compose stack set to
+`restart: always`, tends to already own 5432, and `docker compose up` would die
+on *"port is already allocated"* before reaching anything interesting. Services
+inside the stack are unaffected; they reach the database as `postgres:5432`
+regardless. If 15432 is also taken, set `POSTGRES_HOST_PORT` in `.env`.
+
 <details>
 <summary>Without Docker</summary>
 
