@@ -70,7 +70,9 @@ memory server, Postgres. *`docker-compose.yml`*
 
 **Scores 115/115 on a benchmark you can run yourself.** `python -m bench` is
 offline and deterministic — every model call is scripted — so the number is
-reproducible on your machine. *`bench/`*
+reproducible on your machine. A further 10 points (T12) grade whether the
+assistant answers from memory instead of asking you to repeat yourself; those
+need a provider key and are skipped without one. *`bench/`*
 
 ---
 
@@ -124,8 +126,8 @@ is [PROJECT_SPEC.md](PROJECT_SPEC.md).
 ## Benchmarks
 
 115/115 on both storage backends, measured by an offline deterministic suite
-that also runs in CI. Tiers, method and stress-test findings:
-[BENCHMARKS.md](BENCHMARKS.md).
+that also runs in CI — 125/125 including the live tier, which needs a provider
+key. Tiers, method and stress-test findings: [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Deployment
 

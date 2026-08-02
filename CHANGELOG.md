@@ -4,6 +4,35 @@ All notable changes to MemAssist. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — unreleased
+
+### Changed
+- The assistant now answers from what it retrieves instead of asking for it
+  again. A search that returns relevant content is treated as an answer:
+  it states the substance and says where it came from, and matches by meaning
+  rather than by keyword, so a question about a "3 month goal" is answered by a
+  plan the user described over three months without ever using that word. It
+  asks the user only for things it could not retrieve.
+- Goals, deadlines, projects and commitments are now saved as durable facts
+  alongside identity and preferences — the short form to core memory, the
+  detail to archival.
+- Replies drawn from memory are attributed ("you told me on 12 June"), so a
+  remembered fact is distinguishable from an assumed one.
+- The system prompt carries today's date, which lets the assistant say whether
+  a stored deadline has passed and reason from a date the user supplies
+  ("it's mid-September — what did I miss?").
+
+### Added
+- Benchmark tier T12, memory utilization (10 points, ceiling 125). Unlike
+  T1–T11 it needs a live provider, because it grades a decision the model
+  makes; it is skipped when no key is present and the ceiling falls back to
+  115, so CI stays offline and reproducible.
+
+### Fixed
+- A turn could end in silence. The assistant could spend every tool round
+  searching and never send a message, leaving the user with an empty reply
+  rather than a partial answer.
+
 ## [1.0.1] — 2026-08-01
 
 ### Changed
