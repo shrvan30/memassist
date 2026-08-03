@@ -39,7 +39,13 @@ All notable changes to MemAssist. Format follows
 ### Fixed
 - A turn could end in silence. The assistant could spend every tool round
   searching and never send a message, leaving the user with an empty reply
-  rather than a partial answer.
+  rather than a partial answer. Two things now prevent it. The prompt asks the
+  agent to budget its tool rounds and always finish with `send_message`; and,
+  because an instruction is not a guarantee, the turn's final step now enforces
+  it in code — a reply that would be empty is composed instead from the turn's
+  own tool results, quoted verbatim with the timestamps they carry, or from a
+  short "I couldn't compose an answer this turn" when there is nothing to
+  quote. The fallback costs no model call and invents nothing.
 - The first archival search of an API process paid the embedding model's load
   in the middle of a user's turn — 16.4s, indistinguishable from the assistant
   thinking slowly. The model is now warmed at startup, where nobody is waiting:
