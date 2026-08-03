@@ -70,6 +70,12 @@ class AgentState(TypedDict, total=False):
     last_text: str              # assistant prose, surfaced only as a fallback
     final_reply: list[str]      # what step() returns to the caller
     gated_action: dict | None   # tool call awaiting human approval
+    turn_findings: list         # {tool_call_id, tool, detail} per tool this turn,
+                                # so `respond` can compose a reply from what was
+                                # found if the model never sends one. Holds the
+                                # id, not the text: the content is read back off
+                                # `messages` at the end, which is the copy the
+                                # sanitizer has already rewritten (spec §6.2).
 
     # -- security ----------------------------------------------------------
     untrusted_results: list     # results from trust=untrusted servers, awaiting

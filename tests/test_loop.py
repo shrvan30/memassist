@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from agent.loop import AgentLoop
+from graph.nodes import FALLBACK_NOTHING_FOUND, FALLBACK_PREAMBLE
 from llm.router import ChatResult, ToolCall, Usage
 
 
@@ -96,8 +97,12 @@ def test_heartbeat_cap(mem):
 
     outputs = loop.step("hello")
 
-    assert outputs == []
     assert router.calls == 3  # capped
+    # This used to assert `outputs == []`, which wrote the silence bug down as
+    # the expected behaviour: a turn that hit the cap told the user nothing and
+    # the suite called that correct. The cap is still the thing under test here
+    # — what changed is that reaching it is no longer allowed to end in silence.
+    assert " ".join(outputs).strip()
 
 
 def test_text_fallback_when_no_send_message(mem):
@@ -216,3 +221,64 @@ def test_pressure_uses_active_provider_window(mem):
     loop = make_loop(mem, router, planning_context_limit=1000)
     loop.step("hey")
     assert loop.last_limit == 500
+
+
+# --- the liveness guarantee ----------------------------------------------
+# A turn may never return an empty reply. The prompt asks the model to finish
+# with send_message; these lock in what happens when it does not, because an
+# instruction is not a guarantee and the benchmark (T12b) caught it failing.
+def test_a_turn_that_only_searches_still_replies_from_what_it_found(mem):
+    """Every heartbeat spent searching, send_message never called.
+
+    Before the guarantee this returned [] and the user saw nothing at all.
+    """
+    mem.dispatch(
+        "archival_memory_insert",
+        {"content": "VidRAG deliverable due 30 August 2026.", "source": "stated"},
+    )
+    router = FakeRouter(
+        [
+            result(
+                tool_calls=[
+                    tool(
+                        "archival_memory_search",
+                        '{"query":"deadline","request_heartbeat":true}',
+                        id=f"call_search_{i}",
+                    )
+                ],
+            )
+            for i in range(5)
+        ]
+    )
+    loop = make_loop(mem, router, max_heartbeats=5)
+
+    replies = loop.step("what did I miss?")
+
+    assert router.calls == 5, "the model should have burned every heartbeat"
+    text = " ".join(replies).strip()
+    assert text, "a turn must never return an empty reply"
+    assert "VidRAG" in text, "the reply must quote what was actually found"
+    assert FALLBACK_PREAMBLE in text
+    assert mem.store.count_messages(event_types=("fallback",)) == 1
+
+
+def test_a_turn_with_nothing_to_quote_still_replies_honestly(mem):
+    """No tool calls, no message, no prose — the one case with nothing to say."""
+    router = FakeRouter([result(content=None)])
+    loop = make_loop(mem, router)
+
+    replies = loop.step("hello?")
+
+    assert " ".join(replies).strip() == FALLBACK_NOTHING_FOUND
+    assert mem.store.count_messages(event_types=("fallback",)) == 1
+
+
+def test_an_empty_send_message_counts_as_silence(mem):
+    """send_message with a blank argument is silence wearing a different hat."""
+    router = FakeRouter([result(tool_calls=[tool("send_message", '{"text":"   "}')])])
+    loop = make_loop(mem, router)
+
+    replies = loop.step("are you there?")
+
+    assert " ".join(replies).strip() == FALLBACK_NOTHING_FOUND
+    assert mem.store.count_messages(event_types=("fallback",)) == 1
