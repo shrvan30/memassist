@@ -52,6 +52,32 @@ function describe(event: Extract<StreamEvent, { type: "event" }>): string | null
   }
 }
 
+/** Render the markdown the models actually emit: bold, inline code, bullets.
+ *
+ * Not a markdown parser — a parser is a dependency and a bundle, and replies
+ * here only ever use these three. Anything else stays literal, which is what
+ * `whitespace-pre-wrap` already handles well. Raw `**text**` on screen was the
+ * only part that read as broken.
+ */
+function rich(text: string) {
+  // Bullet markers first, so a line-leading "* " never reaches the bold split.
+  // The `\s` is required, so `**bold at line start**` is untouched.
+  const lines = text.replace(/^(\s*)[*-]\s+/gm, "$1• ");
+  return lines.split(/(\*\*[^*\n]+\*\*|`[^`\n]+`)/g).map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      return (
+        <code key={i} className="rounded bg-black/30 px-1 py-0.5 text-[0.9em]">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activity, setActivity] = useState<Activity[]>([]);
@@ -236,7 +262,7 @@ export default function Home() {
                 }`}
               >
                 <p className="whitespace-pre-wrap break-words">
-                  {message.text}
+                  {message.role === "assistant" ? rich(message.text) : message.text}
                   {message.streaming && (
                     <span className="ml-0.5 inline-block animate-pulse">▍</span>
                   )}
