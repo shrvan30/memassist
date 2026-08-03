@@ -1,0 +1,112 @@
+name: deploy
+
+# Runs only on a published release, or by hand. Never on push or pull_request:
+# a deploy triggered by a branch is a deploy nobody decided to do.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image tag to deploy (e.g. 1.1.0, or latest)"
+        required: true
+        default: latest
+
+concurrency:
+  # Two deploys touching the same host would interleave `pull` and `up -d`.
+  group: deploy-demo
+  cancel-in-progress: false
+
+jobs:
+  # Everything below needs three secrets on the `demo` environment. Until they
+  # exist this reports "not configured" and the deploy job SKIPS — grey, not
+  # red. A missing deployment target is a state this repository is expected to
+  # be in (see deploy/README.md on Oracle's capacity lottery), so it must not
+  # look like a broken build to anyone reading the Actions tab.
+  #
+  # It is a separate job because `secrets` is not available to a job-level `if`;
+  # the value has to be laundered through an output first.
+  preflight:
+    runs-on: ubuntu-latest
+    environment: demo
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -n "$DEPLOY_HOST" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy skipped::No DEPLOY_HOST secret on the 'demo' environment, so there is no host to deploy to. This is not a failure."
+          fi
+
+  deploy:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    environment: demo
+    steps:
+      # A release deploys its own tag; a manual run deploys what was typed.
+      # github.event.release.tag_name is "v1.1.0"; the image tag is "1.1.0",
+      # because metadata-action strips the v (type=semver,pattern={{version}}).
+      - id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          INPUT: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT" ]; then
+            version="$INPUT"
+          else
+            version="${TAG#v}"
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "Deploying MEMASSIST_VERSION=$version"
+
+      - name: Pull and restart on the host
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true          # stop at the first failing command
+          script: |
+            set -euo pipefail
+            cd /opt/memassist
+            # Written to .env so a later manual `docker compose up -d` on the
+            # host deploys the same version, instead of silently reverting to
+            # whatever :latest points at now.
+            grep -q '^MEMASSIST_VERSION=' .env \
+              && sed -i "s|^MEMASSIST_VERSION=.*|MEMASSIST_VERSION=${{ steps.version.outputs.value }}|" .env \
+              || echo "MEMASSIST_VERSION=${{ steps.version.outputs.value }}" >> .env
+            docker compose -f docker-compose.deploy.yml pull
+            docker compose -f docker-compose.deploy.yml up -d
+            docker image prune -f   # a 12 GB box fills up fast on ~2 GB images
+
+      # Through Caddy, over the real domain, with the real password: this is the
+      # only check that proves what a visitor gets. Hitting the container
+      # directly would pass while TLS, basic_auth or the /api route were broken.
+      - name: Verify the deployed API answers through Caddy
+        env:
+          DOMAIN: ${{ secrets.DEPLOY_DOMAIN }}
+          CURL_USER: ${{ secrets.DEPLOY_BASIC_AUTH }}   # "user:password"
+        run: |
+          set -uo pipefail
+          url="https://${DOMAIN:-${{ secrets.DEPLOY_HOST }}}/api/healthz"
+          echo "Probing $url"
+          # The stack has just restarted and the API waits on Postgres, so give
+          # it a bounded chance to come up rather than racing it once.
+          for attempt in $(seq 1 20); do
+            body=$(curl -fsS --max-time 10 ${CURL_USER:+--user "$CURL_USER"} "$url") && {
+              echo "healthz: $body"
+              echo "$body" | grep -q '"status":"ok"' && exit 0
+              echo "::error title=Deploy verification failed::$url answered but not with status ok: $body"
+              exit 1
+            }
+            echo "attempt $attempt: not ready yet"
+            sleep 6
+          done
+          echo "::error title=Deploy verification failed::$url never returned a healthy response after ~2 minutes. The new images are running but unverified — check 'docker compose -f docker-compose.deploy.yml ps' and 'logs caddy' on the host."
+          exit 1
