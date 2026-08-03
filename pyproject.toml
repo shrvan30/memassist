@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "ruff>=0.6", "pip-audit>=2.7"]
+dev = ["pytest>=7.4", "pytest-timeout>=2.3", "ruff>=0.6", "pip-audit>=2.7"]
 
 [tool.setuptools]
 packages = ["agent", "api", "graph", "llm", "memory_server", "memory_server.storage", "security"]
@@ -49,3 +49,10 @@ select = ["E4", "E7", "E9", "F", "I"]
 testpaths = ["tests"]
 addopts = "-q"
 markers = ["llm: needs live provider keys (deselected in CI)"]
+# A hang must become a named failure in two minutes, not a fourteen-minute
+# mystery with no indication of which test stopped. 120s is ~40x the slowest
+# real test here, so this only ever fires on something genuinely stuck.
+# "thread" rather than "signal": signal-based timeouts do not work on Windows,
+# and the suite runs on both.
+timeout = 120
+timeout_method = "thread"

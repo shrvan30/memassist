@@ -13,6 +13,31 @@ from memory_server.storage.sqlite import SQLiteStore
 TEST_CORE_LIMIT = 200
 
 
+@pytest.fixture(autouse=True)
+def _no_provider_calls(request, monkeypatch):
+    """Fail fast if a test builds a real provider client.
+
+    CI already runs `pytest -m "not llm"`, but nothing was ever marked `llm`, so
+    that filter deselected nothing and protected nothing. A test that reached a
+    provider would not be *excluded* — it would run, block on the network, and
+    stall the job with no indication of which test was responsible.
+
+    This makes the marker load-bearing: unmarked tests cannot construct a real
+    client at all, and the failure names the test instead of hanging it. Opt in
+    with @pytest.mark.llm when a test genuinely needs a live provider.
+    """
+    if request.node.get_closest_marker("llm"):
+        return
+
+    def _refuse(*_a, **_kw):
+        raise RuntimeError(
+            "This test tried to build a real provider client. The suite is "
+            "offline: inject a fake, or mark the test @pytest.mark.llm."
+        )
+
+    monkeypatch.setattr("llm.router.OpenAIChatClient", _refuse)
+
+
 @pytest.fixture
 def store(tmp_path):
     s = SQLiteStore(
