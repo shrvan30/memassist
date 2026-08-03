@@ -940,6 +940,12 @@ def t10c_nothing_sendable_spends_no_request(tmp):
 T12_PROVIDER = os.getenv("MEMASSIST_BENCH_T12_PROVIDER", "openrouter")
 T12_POINTS = {"T12a": 4, "T12b": 3, "T12c": 3}
 
+# The retry pause, as a module attribute so it can be replaced with a no-op.
+# Every other sleep in this codebase is already injectable (`Router(sleep_fn=)`,
+# `run_scheduled(stop=)`); this was the last one that could only be waited out,
+# and a real sleep reachable from a test is how a suite stops being bounded.
+T12_SLEEP = time.sleep
+
 # Phrases that count as attributing an answer to stored memory. Broad on
 # purpose: the instruction asks for attribution, not for one wording.
 _ATTRIBUTION = (
@@ -1007,7 +1013,7 @@ def _t12_turn(mem, question: str, attempts: int = 3, pause: float = 20.0) -> str
         if PROVIDERS_EXHAUSTED_MESSAGE[:40] not in reply:
             return reply
         if attempt < attempts - 1:
-            time.sleep(pause)
+            T12_SLEEP(pause)
     return reply
 
 
