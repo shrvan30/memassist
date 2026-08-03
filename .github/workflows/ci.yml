@@ -203,15 +203,28 @@ jobs:
           - image: memassist-api      # also runs the memory-mcp service
             context: .
             dockerfile: Dockerfile
+            build_args: ""
           # NEXT_PUBLIC_API_BASE is baked into the client bundle at BUILD time,
-          # so the published web image carries the Dockerfile default
-          # (http://localhost:8000). Anyone serving the API from another origin
-          # must rebuild rather than set an env var at run time.
+          # so it cannot be set when the container starts — it has to be decided
+          # here. A RELATIVE base is the only value that suits a published
+          # image: the browser then calls the same origin it loaded the page
+          # from, so one image works behind any domain, and the reverse proxy
+          # routes /api to the API (see deploy/Caddyfile). An absolute URL would
+          # hard-code somebody else's hostname into a public artifact.
+          #
+          # Local `docker compose` is unaffected: it builds web itself and its
+          # build arg still defaults to http://localhost:8000.
           - image: memassist-web
             context: ./web
             dockerfile: ./web/Dockerfile
+            build_args: NEXT_PUBLIC_API_BASE=/api
     steps:
       - uses: actions/checkout@v4
+
+      # arm64 is the point of this: the free hosting that actually fits this app
+      # is Ampere (Oracle A1), and an amd64-only image will not run there at all.
+      # GitHub's hosted runners are amd64, so the arm64 leg is emulated.
+      - uses: docker/setup-qemu-action@v3
 
       # REQUIRED for the cache-to below, and the reason the v1.0.0 tag run died.
       # Without this the build uses the runner's default builder, which is on
@@ -248,13 +261,30 @@ jobs:
             org.opencontainers.image.description=A MemGPT-style personal assistant with infinite memory, running at $0/month
 
       - uses: docker/build-push-action@v6
+        # EXPECT A LONG TAG BUILD. The arm64 leg runs under QEMU on an amd64
+        # runner, so every compiled step costs roughly an order of magnitude
+        # more than native. Measured shapes: the api image installs CPU torch
+        # and then bakes bge-small by importing sentence-transformers, which is
+        # emulated CPU work — budget 30-60 min for that leg, ~10 min for web.
+        # Both matrix legs run in parallel, so the tag run is bounded by the api
+        # image. Only tag pushes pay this; PRs never reach the publish job.
+        #
+        # The upgrade path, if that becomes tiresome, is a native arm64 runner
+        # (ubuntu-24.04-arm) building each platform separately and merging the
+        # manifest — more workflow for less wall clock. Not worth it at one
+        # release at a time.
+        timeout-minutes: 90
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          build-args: ${{ matrix.build_args }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # The api image bakes bge-small into a layer, so it is worth caching.
+          # Scoped per platform by buildx automatically; a shared scope would
+          # have the two legs overwrite each other's cache manifest.
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
