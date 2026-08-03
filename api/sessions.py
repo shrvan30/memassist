@@ -81,6 +81,24 @@ class EventRecorder:
             q.put(payload)
 
 
+def _warm_embedder() -> None:
+    """Load the local embedding model off the request path.
+
+    The model is process-cached and lazy, so the ~16s load lands on whichever
+    request first searches archival memory — i.e. in the middle of a user's
+    turn, looking exactly like the assistant thinking slowly. Paying it at
+    startup costs nothing anyone is waiting on. On a background thread so it
+    cannot delay the port opening: worst case the first search still loads it.
+    """
+    try:
+        from memory_server.storage import embedder
+
+        embedder.get_model()
+        _log.info("Embedding model warm and cached")
+    except Exception:  # never take the service down over a warm-up
+        _log.warning("Embedding warm-up failed; it will load on first use", exc_info=True)
+
+
 @dataclass
 class Session:
     session_id: str
@@ -142,6 +160,7 @@ class SessionRegistry:
         # per-session: started once, shared by every loop.
         self._external = assembly.build_tools()
         self._router = assembly.build_router()
+        threading.Thread(target=_warm_embedder, name="embedder-warmup", daemon=True).start()
 
     def shutdown(self) -> None:
         if self._external is not None:
