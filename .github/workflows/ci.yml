@@ -8,6 +8,10 @@ on:
 jobs:
   python:
     runs-on: ubuntu-latest
+    # Backstop. Run #31 spent 14m19s on a leg that takes under 5 when healthy,
+    # and produced no usable signal. Every step below is bounded too, so a stall
+    # is attributed to a step rather than to "the job".
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -35,6 +39,7 @@ jobs:
         with: { python-version: "3.11", cache: pip }
 
       - run: pip install -r requirements.txt
+        timeout-minutes: 8
 
       # Defect #5, still on probation: one postgres leg failed with a bare
       # "exit code 1" and passed unchanged on the next run. The service
@@ -69,9 +74,14 @@ jobs:
 
       - name: Lint
         if: matrix.backend == 'sqlite'
+        timeout-minutes: 3
         run: ruff check .
 
       - name: Unit + security tests (no LLM keys)
+        # pytest-timeout caps each TEST at 120s and names the offender; this
+        # caps the step, for a stall outside any single test (collection,
+        # interpreter start, a leaked non-daemon thread at exit).
+        timeout-minutes: 10
         env:
           # Set only on the postgres leg; unset, the dual-backend suite skips
           # its Postgres half rather than silently passing it.
@@ -94,6 +104,8 @@ jobs:
           exit $code
 
       - name: Benchmark (regression gate, must stay 115/115)
+        # Downloads bge-small on a cold cache, so this is the slowest step.
+        timeout-minutes: 12
         env:
           MEMASSIST_BENCH_POSTGRES_DSN: ${{ matrix.backend == 'postgres' && 'postgresql://memassist:memassist@localhost:5432/memassist' || '' }}
         run: |
@@ -107,11 +119,14 @@ jobs:
 
       - name: Secret scan
         if: matrix.backend == 'sqlite'
+        timeout-minutes: 5
         uses: gitleaks/gitleaks-action@v2
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
 
       - name: Dependency audit
         if: matrix.backend == 'sqlite'
+        # Queries the advisory database over the network, so it can stall.
+        timeout-minutes: 6
         # PYSEC-2026-311: chromadb RCE via trust_remote_code on the /api/v2 HTTP
         # endpoint. No fixed release exists, and MemAssist runs Chroma embedded
         # (PersistentClient) with no server, so the endpoint does not exist here.
