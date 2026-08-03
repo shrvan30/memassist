@@ -184,6 +184,7 @@ class AgentLoop:
                 "done": False,
                 "saw_untrusted": False,
                 "untrusted_results": [],
+                "turn_findings": [],
                 "injection_flags": [],
                 "blocked_tools": [],
                 "tool_decisions": {},

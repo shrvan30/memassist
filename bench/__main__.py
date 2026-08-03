@@ -1089,8 +1089,14 @@ def t12c_answers_a_paraphrased_probe(tmp):
     )
 
 
-# Registered only when the pinned provider has a key — see the note above.
-if _t12_key_present():
+# Registered only when the pinned provider has a key AND the run explicitly asks
+# for the live tier. A key alone used to be enough, which meant every routine
+# `python -m bench` on a developer machine spent real free-tier quota — three
+# turns of up to five heartbeats each, on top of whatever the day's actual work
+# needed. Quota exhausted this way then fails T12 for reasons that have nothing
+# to do with the agent, so the tier both cost something and told you nothing.
+# Opting in makes the release gate a deliberate act: MEMASSIST_BENCH_LIVE=1.
+if os.getenv("MEMASSIST_BENCH_LIVE") == "1" and _t12_key_present():
     TIER_NAMES["T12"] = "Memory utilization (live)"
     for _cid, _fn in (
         ("T12a", t12a_answers_without_the_users_keyword),

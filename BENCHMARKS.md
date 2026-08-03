@@ -8,13 +8,13 @@ score identically, which is the point of running both. `pytest`: 251 passed
 rather than silently pass).
 
 Of that, **115 points are offline and deterministic** and 10 (T12) require a
-live provider; without a provider key T12 is not registered and the run scores
-out of 115.
+live provider. T12 is opt-in: a plain run scores out of 115 and spends nothing.
 
 ```bash
-make bench              # the scored suite
-make bench LIVE=1       # adds live provider calls, reported but not scored
-make stress             # unscored load scenarios
+make bench                            # the scored offline suite, out of 115
+MEMASSIST_BENCH_LIVE=1 python -m bench   # adds T12, out of 125 — spends quota
+make bench LIVE=1                     # adds a provider smoke test, not scored
+make stress                           # unscored load scenarios
 python -m bench --json out.json
 ```
 
@@ -61,9 +61,29 @@ change which model is being graded partway through a run. Provider exhaustion is
 retried with a pause: a 429 means the free tier is busy, not that the agent
 failed to use its memory.
 
-**T12 is registered only when the pinned provider has a key.** Without one the
-tier does not exist and the ceiling is 115, so CI — which holds no keys — stays
-offline, reproducible, and green. A local run with keys scores out of 125.
+**T12 is registered only when `MEMASSIST_BENCH_LIVE=1` AND the pinned provider
+has a key.** Either one missing and the tier does not exist, the ceiling is 115,
+and the run makes no network call — so CI, which holds no keys, stays offline,
+reproducible and green.
+
+The environment variable is the newer half of that condition, and it exists
+because a key alone was too easy to satisfy. Anyone with a working `.env` spent
+real quota on every routine `python -m bench`: three turns of up to five
+heartbeats each. Quota burned that way then fails T12 for reasons that have
+nothing to do with the agent — the reply becomes "I've hit the free-tier limit",
+which scores zero exactly like a wrong answer would. The tier was costing
+something and measuring nothing. Running the release gate is now a deliberate
+act:
+
+```bash
+MEMASSIST_BENCH_LIVE=1 MEMASSIST_BENCH_T12_PROVIDER=gemini python -m bench
+```
+
+Pick the provider with quota to spare rather than the strongest model on paper.
+Providers differ more in their free-tier ceilings than in their ability to pass
+this tier: a chain member with a low tokens-per-minute limit fails T12 on
+arithmetic, since three ~3,000-token turns in quick succession exceed it
+regardless of how good the model is.
 
 Because the score depends on the pinned model's instruction-following, T12 is a
 measurement of the whole system rather than of the memory layer alone. Treat a

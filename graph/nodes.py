@@ -39,6 +39,7 @@ EVENT_PRESSURE_WARNING = "pressure_warning"
 EVENT_EVICTION = "eviction"
 EVENT_INTERNAL = "internal"
 EVENT_SECURITY = "security"
+EVENT_FALLBACK = "fallback"
 
 # Below this many messages there is nothing worth paging out, so an offload
 # leaves the queue alone.
@@ -57,6 +58,37 @@ PROVIDERS_EXHAUSTED_MESSAGE = (
     "I've hit the free-tier limit on every language-model provider I can reach, "
     "so I can't think of a reply right now. Your message is saved in my memory — "
     "please try again in a minute, or check the provider panel for details."
+)
+
+# Said when the turn produced nothing at all: no message, no prose, and nothing
+# found worth quoting. Short and honest — inventing an answer here would be the
+# worse failure.
+FALLBACK_NOTHING_FOUND = (
+    "I couldn't compose an answer this turn — could you rephrase?"
+)
+
+FALLBACK_PREAMBLE = (
+    "I used up my tool rounds before writing a proper reply. Here is what I "
+    "found, quoted from my memory rather than summarized:"
+)
+
+FALLBACK_CLOSING = "Ask me again and I'll answer directly."
+
+# How much of the turn's findings the fallback quotes. Bounded because this text
+# goes to a human, not to a model: three results is enough to be useful and
+# short enough to read.
+FALLBACK_MAX_FINDINGS = 3
+FALLBACK_CHARS_PER_FINDING = 600
+
+# Result strings that carry no finding. Matched case-insensitively against the
+# start of the tool result, whose wording is this repository's own
+# (memory_server/memory_tools.py) — not a model's.
+_EMPTY_RESULT_PREFIXES = (
+    "no messages in recall memory",
+    "no results on page",
+    "no archival passages",
+    "archival memory is empty",
+    "error:",
 )
 
 _log = logging.getLogger(__name__)
@@ -250,6 +282,8 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
     external_names = external.names() if external else frozenset()
     decisions = state.get("tool_decisions") or {}
     untrusted: list[dict] = []
+    # Accumulates across heartbeats, so `respond` sees the whole turn's work.
+    findings: list[dict] = list(state.get("turn_findings") or [])
 
     for tc in state["pending_tool_calls"]:
         decision = decisions.get(tc.id)
@@ -315,6 +349,16 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
                 )
                 if tc.name == "archival_memory_insert" and not tool_content.startswith("Error:"):
                     offloaded = True
+            # Only ALLOWED, EXECUTED tools are recorded. A refused call never
+            # reaches here, so the fallback can never quote something the guards
+            # stopped, and never has to re-check them.
+            findings.append(
+                {
+                    "tool_call_id": tc.id,
+                    "tool": tc.name,
+                    "detail": str(args.get("query") or args.get("content") or "")[:80],
+                }
+            )
             if args.get("request_heartbeat"):
                 wants_heartbeat = True
         # Every tool_call must be answered before the next model call.
@@ -325,6 +369,7 @@ def dispatch_tools(state: AgentState, deps: Deps) -> dict:
         "final_reply": outputs,
         "pending_tool_calls": [],
         "untrusted_results": untrusted,
+        "turn_findings": findings,
         "heartbeat_count": state.get("heartbeat_count", 0) + 1,
         # Delivered a reply and not explicitly chaining -> the turn is over.
         "done": sent_message and not wants_heartbeat,
@@ -410,16 +455,100 @@ def respond(state: AgentState, deps: Deps) -> dict:
     """Terminal node: guarantee the user gets something back.
 
     ``send_message`` is the only real channel, so a model that ends its turn on
-    plain prose would otherwise say nothing at all.
+    plain prose would otherwise say nothing at all. That fallback existed
+    already. What it did not cover is the turn that ends on a TOOL CALL: the
+    model spends every heartbeat searching, the cap stops the cycle, and the
+    last assistant message carries tool calls and no content — so there is no
+    prose to fall back to and the user gets silence. The benchmark reproduces
+    it (T12b) and the prompt alone does not prevent it, because "always finish
+    with send_message" is an instruction, and an instruction is not a
+    guarantee.
+
+    So the guarantee is here instead, in code: this node cannot return an empty
+    reply. What it says is assembled from the turn's own tool results — already
+    dispatched, already guarded, already sanitized — so it costs no model call,
+    no quota, and adds no words the results did not already contain.
     """
-    outputs = list(state.get("final_reply", []))
+    # A blank string is not a reply. `send_message` with an empty `text`
+    # argument lands in final_reply as "" and would otherwise count as having
+    # answered, which is the same silence wearing a different hat.
+    outputs = [text for text in state.get("final_reply", []) if str(text).strip()]
+    if outputs:
+        return {"final_reply": outputs, "done": True}
+
     last_text = (state.get("last_text") or "").strip()
-    if not outputs and last_text:
-        outputs.append(last_text)
+    if last_text:
         deps.memory.record_event(
             "assistant", EVENT_MESSAGE, last_text, served_by=state.get("served_by")
         )
-    return {"final_reply": outputs, "done": True}
+        return {"final_reply": [last_text], "done": True}
+
+    reply, quoted = _fallback_reply(state)
+    _log.warning(
+        "Turn ended with no message; composed a fallback from %d finding(s).", quoted
+    )
+    deps.memory.record_event(
+        "system_event",
+        EVENT_FALLBACK,
+        f"Turn produced no send_message and no prose; replied from "
+        f"{quoted} tool result(s) after {state.get('heartbeat_count', 0)} round(s).",
+    )
+    deps.memory.record_event(
+        "assistant", EVENT_MESSAGE, reply, served_by=state.get("served_by")
+    )
+    observability.event(
+        "turn.silent_fallback",
+        level="WARNING",
+        metadata={
+            "quoted_findings": quoted,
+            "heartbeats": state.get("heartbeat_count", 0),
+            "tools_used": [f.get("tool") for f in state.get("turn_findings") or []],
+        },
+    )
+    return {"final_reply": [reply], "done": True}
+
+
+def _fallback_reply(state: AgentState) -> tuple[str, int]:
+    """Compose a reply from this turn's tool results. Returns (text, quoted).
+
+    Reads the result text back off ``messages`` rather than from a copy taken
+    when the tool ran, because ``sanitize_results`` rewrites untrusted results
+    in place afterwards — quoting the pre-sanitizer text would hand the user
+    exactly the content the sanitizer exists to defang.
+
+    Everything here is verbatim. The only words this function adds are its own
+    framing; the findings themselves are the tools' output, timestamps and all,
+    so a fact keeps the source it arrived with and nothing is invented to fill
+    a gap.
+    """
+    by_id = {
+        message.get("tool_call_id"): str(message.get("content") or "")
+        for message in state.get("messages", [])
+        if message.get("role") == "tool"
+    }
+
+    blocks: list[str] = []
+    for finding in state.get("turn_findings") or []:
+        content = by_id.get(finding.get("tool_call_id"), "").strip()
+        if not content or content.lower().startswith(_EMPTY_RESULT_PREFIXES):
+            continue
+        label = finding.get("tool") or "tool"
+        detail = (finding.get("detail") or "").strip()
+        header = f"{label} — {detail!r}" if detail else label
+        blocks.append(f"• {header}\n{_truncate(content, FALLBACK_CHARS_PER_FINDING)}")
+
+    if not blocks:
+        return FALLBACK_NOTHING_FOUND, 0
+
+    # The last few, not the first: when a model searches repeatedly it is
+    # refining, so its later queries are the ones aimed at the question asked.
+    kept = blocks[-FALLBACK_MAX_FINDINGS:]
+    body = "\n\n".join(kept)
+    return f"{FALLBACK_PREAMBLE}\n\n{body}\n\n{FALLBACK_CLOSING}", len(kept)
+
+
+def _truncate(text: str, cap: int) -> str:
+    return text if len(text) <= cap else text[: cap - 1].rstrip() + "…"
 
 
 def _external_args(args: dict) -> dict:
