@@ -12,6 +12,10 @@ jobs:
     # and produced no usable signal. Every step below is bounded too, so a stall
     # is attributed to a step rather than to "the job".
     timeout-minutes: 20
+    # The benchmark embeds with a local bge-small model. Unpinned, HF caches it
+    # under $HOME where nothing restores it, so every run re-downloads 135 MB.
+    env:
+      HF_HOME: ${{ github.workspace }}/.hf-cache
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +44,20 @@ jobs:
 
       - run: pip install -r requirements.txt
         timeout-minutes: 8
+
+      # Run #31's real cause. The benchmark step took 706s on one leg and 12s
+      # on the other for the same tree, because the only uncached external
+      # dependency in it is a 135 MB model pulled from huggingface.co — cold,
+      # on both matrix legs, in parallel, on every run. When that fetch stalls
+      # the step burns eleven minutes and then fails with the embedder
+      # unavailable, which reads as a hang with no attributable cause.
+      # Cached, it is fetched once per model change instead of ~40 times a day.
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.hf-cache
+          key: hf-${{ runner.os }}-${{ hashFiles('memory_server/storage/embedder.py') }}
+          restore-keys: hf-${{ runner.os }}-
 
       # Defect #5, still on probation: one postgres leg failed with a bare
       # "exit code 1" and passed unchanged on the next run. The service
@@ -104,8 +122,10 @@ jobs:
           exit $code
 
       - name: Benchmark (regression gate, must stay 115/115)
-        # Downloads bge-small on a cold cache, so this is the slowest step.
-        timeout-minutes: 12
+        # 8, not 12: run #31 stalled for 706s and a 12-minute cap would have let
+        # it run almost to completion before tripping. With the model cached
+        # this step is well under a minute, so 8 is already generous.
+        timeout-minutes: 8
         env:
           MEMASSIST_BENCH_POSTGRES_DSN: ${{ matrix.backend == 'postgres' && 'postgresql://memassist:memassist@localhost:5432/memassist' || '' }}
         run: |
