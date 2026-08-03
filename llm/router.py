@@ -28,8 +28,21 @@ from .budgets import BudgetLedger
 
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_PROVIDERS_YAML = Path(__file__).with_name("providers.yaml")
-# Per-request ceiling for a single provider call. See OpenAIChatClient.
-REQUEST_TIMEOUT_SECONDS = 30.0
+
+
+def _request_timeout() -> float:
+    """Seconds allowed for ONE provider request. See OpenAIChatClient.
+
+    A function rather than a bare literal so the default is assertable without
+    reimporting the module — reading the environment at import time otherwise
+    makes the constant untestable in a process that has the variable set.
+    """
+    return float(os.getenv("MEMASSIST_REQUEST_TIMEOUT", "30.0"))
+
+
+# Read once at import: the value is baked into each provider client when it is
+# constructed, so changing the variable mid-process would not take effect anyway.
+REQUEST_TIMEOUT_SECONDS = _request_timeout()
 
 # Superseded env var names, still honoured so an existing .env keeps working.
 # providers.yaml names the canonical one; this maps canonical -> legacy.
@@ -135,6 +148,12 @@ class OpenAIChatClient:
     default is 600 seconds, so one unresponsive provider would hang a turn for
     ten minutes. 30s is ~10x the slowest completion measured here, and keeps a
     full four-provider walk inside the API's own 120s ceiling.
+
+    Raise ``MEMASSIST_REQUEST_TIMEOUT`` if a provider legitimately generates for
+    longer than that, but note what it trades against: a server error costs
+    ``server_retries`` further waits of the same length on the same provider,
+    and four providers x the timeout is the worst-case walk, which at the
+    default already equals the 120s the API waits for a turn.
     """
 
     def __init__(self, base_url: str, api_key: str) -> None:

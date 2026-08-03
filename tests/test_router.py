@@ -16,6 +16,7 @@ from llm.router import (
     ProviderConfig,
     Router,
     ToolCall,
+    _request_timeout,
     load_providers,
     resolve_api_key,
 )
@@ -324,7 +325,7 @@ def test_provider_status_reports_availability():
     assert status["groq"]["available"] is True
 
 
-def test_transport_leaves_all_retrying_to_the_router():
+def test_transport_leaves_all_retrying_to_the_router(monkeypatch):
     """The SDK must not retry underneath us, and must not hang for ten minutes.
 
     Its own 429 retries — two, honouring ``retry-after`` — turned a failover
@@ -338,6 +339,15 @@ def test_transport_leaves_all_retrying_to_the_router():
     client = OpenAIChatClient("https://example.invalid/v1", "sk-not-a-real-key")
     assert client._client.max_retries == 0
     assert client._client.timeout == REQUEST_TIMEOUT_SECONDS
+
+    # The default is asserted through the function, not the constant: the
+    # constant reflects whatever MEMASSIST_REQUEST_TIMEOUT was set to in the
+    # process running the suite, and a test that passes only on an unset
+    # environment is the same defect as reading a DSN out of the ambient shell.
+    monkeypatch.delenv("MEMASSIST_REQUEST_TIMEOUT", raising=False)
+    assert _request_timeout() == 30.0
+    monkeypatch.setenv("MEMASSIST_REQUEST_TIMEOUT", "90")
+    assert _request_timeout() == 90.0
 
 
 def test_load_providers_from_default_yaml():

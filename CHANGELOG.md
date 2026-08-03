@@ -21,6 +21,14 @@ All notable changes to MemAssist. Format follows
 - The system prompt carries today's date, which lets the assistant say whether
   a stored deadline has passed and reason from a date the user supplies
   ("it's mid-September — what did I miss?").
+- The provider transport now leaves **all** retrying to the router. The
+  OpenAI SDK was retrying rate-limited requests underneath it, so the router's
+  "this provider is busy, use the next one" could not happen until the SDK had
+  finished waiting. Walking the whole four-provider chain went from 7.1s to
+  1.5s, and a repeat turn from 12.4s to 1.2s.
+- A single provider request is capped at 30 seconds, rather than the SDK's
+  default of ten minutes. Set `MEMASSIST_REQUEST_TIMEOUT` to change it; the
+  note in `.env.example` explains what it trades against.
 
 ### Added
 - Benchmark tier T12, memory utilization (10 points, ceiling 125). Unlike
@@ -32,6 +40,12 @@ All notable changes to MemAssist. Format follows
 - A turn could end in silence. The assistant could spend every tool round
   searching and never send a message, leaving the user with an empty reply
   rather than a partial answer.
+- The first archival search of an API process paid the embedding model's load
+  in the middle of a user's turn — 16.4s, indistinguishable from the assistant
+  thinking slowly. The model is now warmed at startup, where nobody is waiting:
+  0.16s.
+- Replies in the web UI showed the literal `**` and `*` the models write around
+  bold text and bullets. Bold, inline code and bullet markers now render.
 
 ## [1.0.1] — 2026-08-01
 
