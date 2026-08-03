@@ -28,6 +28,8 @@ from .budgets import BudgetLedger
 
 DEFAULT_TEMPERATURE = 0.3
 DEFAULT_PROVIDERS_YAML = Path(__file__).with_name("providers.yaml")
+# Per-request ceiling for a single provider call. See OpenAIChatClient.
+REQUEST_TIMEOUT_SECONDS = 30.0
 
 # Superseded env var names, still honoured so an existing .env keeps working.
 # providers.yaml names the canonical one; this maps canonical -> legacy.
@@ -119,12 +121,31 @@ class ChatClient(Protocol):
 
 # --- real OpenAI-compatible transport -------------------------------------
 class OpenAIChatClient:
-    """Wraps an ``openai`` client pointed at a provider's base_url."""
+    """Wraps an ``openai`` client pointed at a provider's base_url.
+
+    ``max_retries=0`` is load-bearing, not a default worth keeping. The SDK
+    retries 429s *itself*, twice, honouring the provider's ``retry-after``
+    header — so a rate-limited provider cost three requests and up to ~17s of
+    inline sleeping before this router ever saw the error and failed over. That
+    is the exact opposite of the design: a 429 here means "this provider is
+    busy, use the next one", and the whole chain is walkable in about a second.
+    Retry policy belongs to the router (``server_retries``), in one place.
+
+    The timeout is bounded for the same reason the CI steps are: the SDK
+    default is 600 seconds, so one unresponsive provider would hang a turn for
+    ten minutes. 30s is ~10x the slowest completion measured here, and keeps a
+    full four-provider walk inside the API's own 120s ceiling.
+    """
 
     def __init__(self, base_url: str, api_key: str) -> None:
         import openai  # imported lazily so tests need no network SDK path
 
-        self._client = openai.OpenAI(base_url=base_url, api_key=api_key)
+        self._client = openai.OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            max_retries=0,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
 
     def create(self, **kwargs: Any) -> Any:
         return self._client.chat.completions.create(**kwargs)

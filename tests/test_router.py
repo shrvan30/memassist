@@ -10,7 +10,15 @@ import pytest
 
 from llm import errors
 from llm.budgets import BudgetLedger
-from llm.router import ProviderConfig, Router, ToolCall, load_providers, resolve_api_key
+from llm.router import (
+    REQUEST_TIMEOUT_SECONDS,
+    OpenAIChatClient,
+    ProviderConfig,
+    Router,
+    ToolCall,
+    load_providers,
+    resolve_api_key,
+)
 
 
 # --- helpers --------------------------------------------------------------
@@ -314,6 +322,22 @@ def test_provider_status_reports_availability():
     assert status["gemini"]["available"] is False
     assert status["gemini"]["reason"] == "cooling_down"
     assert status["groq"]["available"] is True
+
+
+def test_transport_leaves_all_retrying_to_the_router():
+    """The SDK must not retry underneath us, and must not hang for ten minutes.
+
+    Its own 429 retries — two, honouring ``retry-after`` — turned a failover
+    that should take milliseconds into ~17s of inline sleeping per rate-limited
+    provider, because the router never got the error until the SDK gave up.
+
+    Constructing the client is offline: ``openai.OpenAI()`` opens no connection,
+    so this needs no key and no ``llm`` marker. The class is imported at module
+    scope, before conftest's autouse guard rebinds the name.
+    """
+    client = OpenAIChatClient("https://example.invalid/v1", "sk-not-a-real-key")
+    assert client._client.max_retries == 0
+    assert client._client.timeout == REQUEST_TIMEOUT_SECONDS
 
 
 def test_load_providers_from_default_yaml():
