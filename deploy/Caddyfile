@@ -1,0 +1,41 @@
+# Caddy terminates TLS, asks for a password, and splits traffic two ways.
+#
+# HTTPS is automatic: name the domain and Caddy obtains and renews a Let's
+# Encrypt certificate over the ACME challenge on port 80. That requires the
+# domain's A/AAAA record to already point at this host — nothing here can work
+# around DNS that has not propagated.
+
+{$DEPLOY_DOMAIN} {
+	# The API has no authentication of its own, and the deployed instance
+	# spends real free-tier provider quota on every turn. This is the only
+	# thing standing between the two, so it guards BOTH routes rather than
+	# just the UI — an unauthenticated /api/chat would be the whole problem
+	# with a prettier URL.
+	basic_auth {
+		# CADDY_HASH is a bcrypt hash from `caddy hash-password`, never a
+		# plaintext password.
+		{$CADDY_USER} {$CADDY_HASH}
+	}
+
+	# handle_path STRIPS the matched prefix, which is the point: the API
+	# serves /chat and /healthz, not /api/chat. The web bundle is built with
+	# NEXT_PUBLIC_API_BASE=/api so the browser's calls land here.
+	handle_path /api/* {
+		reverse_proxy api:8000 {
+			# The chat endpoints stream SSE. Buffering a response that is
+			# meant to arrive token by token would leave the UI blank until
+			# the turn ended, which looks exactly like a hang.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+
+	encode gzip
+	log {
+		output stdout
+		format console
+	}
+}

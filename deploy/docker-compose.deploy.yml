@@ -1,0 +1,130 @@
+# Deployment stack: published images, no build context, Caddy in front.
+#
+#   cd /opt/memassist
+#   docker compose -f docker-compose.deploy.yml pull
+#   docker compose -f docker-compose.deploy.yml up -d
+#
+# The difference from the repo's docker-compose.yml is deliberate and total:
+# that file BUILDS from a checkout and publishes ports to localhost for a
+# developer. This one PULLS tagged images and publishes nothing except Caddy's
+# 80/443. A server with the API port open to the internet is an open relay for
+# whoever finds it, since the API has no auth of its own — the basic_auth in
+# front is the entire access control, so nothing may bypass it.
+#
+# See deploy/README.md for the host setup this assumes.
+
+name: memassist
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-memassist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a real password in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-memassist}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # No `ports`. The database is reachable only from this compose network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-memassist} -d ${POSTGRES_DB:-memassist}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  memory-mcp:
+    image: ghcr.io/shrvan30/memassist-api:${MEMASSIST_VERSION:-latest}
+    command: ["python", "-m", "memory_server", "--http", "--host", "0.0.0.0", "--port", "8090"]
+    environment:
+      MEMASSIST_POSTGRES_DSN: postgresql://${POSTGRES_USER:-memassist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-memassist}
+      MEMASSIST_STORAGE_BACKEND: postgres
+      HF_HOME: /opt/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  api:
+    image: ghcr.io/shrvan30/memassist-api:${MEMASSIST_VERSION:-latest}
+    environment:
+      MEMASSIST_POSTGRES_DSN: postgresql://${POSTGRES_USER:-memassist}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-memassist}
+      MEMASSIST_STORAGE_BACKEND: postgres
+      # Same-origin now — the browser loads the page and calls the API from the
+      # one domain Caddy serves — so this only ever matters if you later split
+      # them across hosts.
+      MEMASSIST_CORS_ORIGINS: https://${DEPLOY_DOMAIN}
+      MEMASSIST_MCP_URL: http://memory-mcp:8090/mcp
+      HF_HOME: /opt/models
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      MEMASSIST_EXTERNAL_TOOLS: ${MEMASSIST_EXTERNAL_TOOLS:-0}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      memory-mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  web:
+    # Published with NEXT_PUBLIC_API_BASE=/api baked in (see ci.yml), so it
+    # calls whatever origin served it. That is what lets one public image work
+    # on your domain without a rebuild.
+    image: ghcr.io/shrvan30/memassist-web:${MEMASSIST_VERSION:-latest}
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    # The only service that publishes anything. 80 is not decorative: it is
+    # where the ACME HTTP challenge lands, so closing it breaks certificate
+    # issuance and renewal, not just redirects.
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DEPLOY_DOMAIN: ${DEPLOY_DOMAIN:?set the domain Caddy should serve}
+      CADDY_USER: ${CADDY_USER:?set a basic-auth username}
+      CADDY_HASH: ${CADDY_HASH:?set a bcrypt hash from `caddy hash-password`}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Without this volume every restart
+      # re-issues from scratch and walks into Let's Encrypt's rate limit.
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddydata:
+  caddyconfig:

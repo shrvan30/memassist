@@ -131,15 +131,14 @@ key. Tiers, method and stress-test findings: [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Deployment
 
-Local `docker compose` is the supported deployment. As of July 2026 no free
-application-hosting tier fits this app: Render's free instance is 512 MB and
-0.1 CPU, Fly and Koyeb have closed their free tiers to new accounts, and
-Hugging Face charges for Docker Spaces. The database does have a free option —
-[Neon](https://neon.com/pricing) includes pgvector — so pointing the local
-stack at Neon keeps memory when the machine is off.
+Local `docker compose` is the supported deployment.
 
-Images are published to GHCR on each release tag:
+Release tags publish `linux/amd64` and `linux/arm64` images to GHCR:
 `ghcr.io/shrvan30/memassist-api` and `ghcr.io/shrvan30/memassist-web`.
+
+To run those on a server behind HTTPS and a password — including the exact
+Oracle Cloud A1 free-tier path and its caveats — see
+[deploy/README.md](deploy/README.md).
 
 ## Author
 
