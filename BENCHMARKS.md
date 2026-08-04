@@ -89,6 +89,37 @@ Because the score depends on the pinned model's instruction-following, T12 is a
 measurement of the whole system rather than of the memory layer alone. Treat a
 T12 regression as a prompt or model question first.
 
+## Running against Postgres
+
+```bash
+MEMASSIST_BENCH_POSTGRES_DSN=postgresql://memassist:memassist@localhost:15432/memassist \
+  python -m bench
+```
+
+The header names the backend, so a run that says `[sqlite+chroma]` when you
+expected Postgres has not picked up the DSN.
+
+**That variable is deliberately not `MEMASSIST_POSTGRES_DSN`, and the two are
+not aliased.** Every check creates a throwaway schema and drops it, so the
+suite issues destructive DDL continuously; if it read the application's DSN it
+would do that to whatever database the app is configured for. Setting the app's
+variable therefore has no effect on the benchmark — which used to look exactly
+like a broken benchmark, so a run in that state now prints a warning saying so.
+
+Schemas are dropped in the same `finally` that removes each check's temp
+directory, so a failing check cleans up as reliably as a passing one. Runs from
+before that existed left one schema behind per check:
+
+```bash
+MEMASSIST_BENCH_POSTGRES_DSN=... python -m bench --cleanup-orphan-schemas
+# prints the count, asks for confirmation; --yes skips the prompt
+```
+
+It only drops names matching `bench_` plus twelve hex digits — exactly what the
+harness generates. A SQL `LIKE 'bench_%'` filter alone would not be safe, since
+`_` is itself a single-character wildcard and would also match a schema someone
+had called `benchmarks`.
+
 ## Method
 
 T1–T11 are deterministic and offline. Every provider call is a scripted fake
