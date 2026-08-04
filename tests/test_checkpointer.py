@@ -22,6 +22,7 @@ import uuid
 import pytest
 
 import assembly
+import config
 from agent.loop import AgentLoop
 from tests.test_loop import FakeRouter, result, tool
 
@@ -67,9 +68,20 @@ def test_sqlite_backend_gets_an_in_memory_saver():
     assert isinstance(assembly.build_checkpointer("sqlite"), InMemorySaver)
 
 
-def test_postgres_backend_without_a_dsn_is_an_error_not_a_silent_downgrade():
+def test_postgres_backend_without_a_dsn_is_an_error_not_a_silent_downgrade(monkeypatch):
     """Falling back to InMemorySaver here would be the §9 gap, reintroduced
-    silently: durability configured, durability not delivered, nothing said."""
+    silently: durability configured, durability not delivered, nothing said.
+
+    Absence has to be constructed, not assumed. The variable alone is not
+    enough: ``config`` reads it once at import into a module-level constant,
+    and ``build_checkpointer`` falls back to *that*, so a developer with a DSN
+    in their .env — or a container that sets one — failed this test for having
+    a working configuration. Same fix as the router's resolver tests: make the
+    condition under test true here rather than inheriting it from the shell.
+    """
+    monkeypatch.delenv("MEMASSIST_POSTGRES_DSN", raising=False)
+    monkeypatch.setattr(config, "POSTGRES_DSN", None)
+
     with pytest.raises(RuntimeError, match="MEMASSIST_POSTGRES_DSN"):
         assembly.build_checkpointer("postgres", dsn=None)
 
