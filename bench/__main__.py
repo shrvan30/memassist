@@ -200,7 +200,21 @@ def tc(name, arguments, cid="call_1"):
 
 # Set to a DSN to run the whole suite against Postgres+pgvector instead of
 # SQLite+Chroma. The score must be identical either way — that is the point.
+#
+# Deliberately NOT config.POSTGRES_DSN, and deliberately not aliased to it. The
+# suite creates and destroys a schema per check; pointing that at whatever
+# database the app is configured for would run destructive DDL against real
+# data on every `python -m bench`. The cost of the separation is that setting
+# the app's DSN appears to do nothing, so `_warn_if_dsn_confused` says so.
 BENCH_PG_DSN = os.getenv("MEMASSIST_BENCH_POSTGRES_DSN")
+
+# Schemas created by the run in progress, so teardown drops exactly what this
+# process made and never guesses from a name pattern.
+_CREATED_SCHEMAS: list[str] = []
+
+# What `make_memory` generates: uuid4().hex[:12]. The cleanup command matches
+# this exactly rather than trusting SQL's LIKE, where `_` is itself a wildcard.
+_BENCH_SCHEMA_RE = re.compile(r"^bench_[0-9a-f]{12}$")
 
 
 def make_memory(tmp: Path, with_archival: bool = True) -> MemoryTools:
@@ -215,6 +229,9 @@ def make_memory(tmp: Path, with_archival: bool = True) -> MemoryTools:
         admin = connect(BENCH_PG_DSN)
         admin.execute(f'CREATE SCHEMA "{schema}"')
         admin.close()
+        # Recorded BEFORE the store opens, so a store that fails to construct
+        # still leaves its schema on the teardown list.
+        _CREATED_SCHEMAS.append(schema)
         dsn = f"{BENCH_PG_DSN}?options=-csearch_path%3D{schema},public"
         store = PostgresStore(
             dsn,
@@ -1139,16 +1156,80 @@ def run_stress_tier() -> list[str]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _warn_if_dsn_confused() -> None:
+    """Say so when the app's DSN is set and the bench's is not.
+
+    Setting MEMASSIST_POSTGRES_DSN and watching the header still say
+    "sqlite+chroma" is a silent no-op that reads as a broken benchmark. The
+    variables are separate on purpose (see BENCH_PG_DSN); what was missing was
+    anything that admitted it.
+    """
+    if BENCH_PG_DSN or not os.getenv("MEMASSIST_POSTGRES_DSN"):
+        return
+    print(
+        "\n" + "!" * 62 + "\n"
+        "WARNING: bench uses its own DSN variable "
+        "(MEMASSIST_BENCH_POSTGRES_DSN);\n"
+        "MEMASSIST_POSTGRES_DSN is ignored — running on SQLite.\n"
+        "The two are separate so the suite's CREATE/DROP SCHEMA per check can "
+        "never\nreach the database the app is using.\n" + "!" * 62
+    )
+
+
+def _drop_schemas(names: list[str]) -> int:
+    """Drop the named schemas. Best-effort: teardown must not fail a run."""
+    if not (BENCH_PG_DSN and names):
+        return 0
+    from memory_server.storage.postgres import connect
+
+    dropped = 0
+    try:
+        admin = connect(BENCH_PG_DSN)
+    except Exception as exc:  # pragma: no cover - the database went away
+        print(f"WARNING: could not connect to drop {len(names)} bench schema(s): {exc}")
+        return 0
+    try:
+        for name in names:
+            try:
+                admin.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
+                dropped += 1
+            except Exception as exc:
+                print(f"WARNING: could not drop schema {name}: {exc}")
+    finally:
+        admin.close()
+    return dropped
+
+
 def run(live: bool = False, json_out: str | None = None, stress: bool = False) -> int:
+    _warn_if_dsn_confused()
+    try:
+        return _run(live=live, json_out=json_out, stress=stress)
+    finally:
+        # The per-check teardown below already drops as it goes; this catches
+        # anything created outside a check (the stress tier) and anything left
+        # by an exception that escaped the loop entirely.
+        leftover = _drop_schemas(_CREATED_SCHEMAS)
+        _CREATED_SCHEMAS.clear()
+        if leftover:
+            print(f"Dropped {leftover} remaining bench schema(s).")
+
+
+def _run(live: bool = False, json_out: str | None = None, stress: bool = False) -> int:
     results = []
     for tier, cid, points, fn in CHECKS:
         tmp = Path(tempfile.mkdtemp(prefix=f"bench_{cid}_"))
+        mark = len(_CREATED_SCHEMAS)
         try:
             outcome, note = fn(tmp)
         except Exception as exc:  # a crash scores zero, never aborts the run
             outcome, note = False, f"EXCEPTION {type(exc).__name__}: {str(exc)[:90]}"
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+            # In the same finally as the temp directory, and for the same
+            # reason: a check that raised still has to clean up after itself,
+            # or a failing suite fills the database with the evidence.
+            _drop_schemas(_CREATED_SCHEMAS[mark:])
+            del _CREATED_SCHEMAS[mark:]
         earned = points * (1.0 if outcome is True else (0.5 if outcome == 0.5 else 0.0))
         results.append({"tier": tier, "id": cid, "points": points, "earned": earned, "note": note})
 
@@ -1187,6 +1268,67 @@ def run(live: bool = False, json_out: str | None = None, stress: bool = False) -
     return 0
 
 
+def cleanup_orphan_schemas(assume_yes: bool = False) -> int:
+    """Drop bench schemas left behind before teardown existed.
+
+    A one-time repair, kept because the mess is real: every Postgres run used to
+    leave one schema per check with nothing to remove them.
+
+    Only names matching exactly what ``make_memory`` generates are touched. The
+    SQL filter alone would not be safe enough — in LIKE, `_` matches any single
+    character, so 'bench_%' also matches 'benchmarks', 'bench-2' and anything
+    else a human might have named a schema.
+    """
+    if not BENCH_PG_DSN:
+        print(
+            "MEMASSIST_BENCH_POSTGRES_DSN is not set, so there is no bench "
+            "database to clean up."
+        )
+        return 1
+
+    from memory_server.storage.postgres import connect
+
+    admin = connect(BENCH_PG_DSN)
+    try:
+        rows = admin.execute(
+            "SELECT schema_name FROM information_schema.schemata "
+            "WHERE schema_name LIKE 'bench\\_%' ESCAPE '\\' ORDER BY schema_name"
+        ).fetchall()
+        candidates = [r["schema_name"] for r in rows]
+        names = [n for n in candidates if _BENCH_SCHEMA_RE.match(n)]
+        skipped = [n for n in candidates if n not in set(names)]
+
+        print(f"{len(names)} orphan bench schema(s) on this DSN.")
+        for name in skipped:
+            print(f"  skipping {name!r}: not a bench schema this harness created")
+        if not names:
+            return 0
+
+        if not assume_yes:
+            print(f"About to DROP SCHEMA ... CASCADE on {len(names)} schema(s).")
+            try:
+                reply = input("Type 'y' to proceed: ").strip().lower()
+            except EOFError:  # non-interactive: refuse rather than assume
+                print("Not a terminal and --yes was not given; nothing dropped.")
+                return 1
+            if reply not in ("y", "yes"):
+                print("Aborted; nothing dropped.")
+                return 1
+
+        dropped = 0
+        for name in names:
+            admin.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
+            dropped += 1
+        remaining = admin.execute(
+            "SELECT count(*) AS n FROM information_schema.schemata "
+            "WHERE schema_name LIKE 'bench\\_%' ESCAPE '\\'"
+        ).fetchone()["n"]
+        print(f"Dropped {dropped}. Remaining bench schemas: {remaining}.")
+        return 0
+    finally:
+        admin.close()
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(prog="bench")
     ap.add_argument("--live", action="store_true", help="also run a real-provider smoke test")
@@ -1196,5 +1338,15 @@ if __name__ == "__main__":
         action="store_true",
         help="also run the unscored stress tier (long sessions, 50 facts, cooldowns)",
     )
+    ap.add_argument(
+        "--cleanup-orphan-schemas",
+        action="store_true",
+        help="drop bench_* schemas left on MEMASSIST_BENCH_POSTGRES_DSN by older runs",
+    )
+    ap.add_argument(
+        "--yes", action="store_true", help="skip the confirmation prompt for --cleanup-orphan-schemas"
+    )
     args = ap.parse_args()
+    if args.cleanup_orphan_schemas:
+        raise SystemExit(cleanup_orphan_schemas(assume_yes=args.yes))
     raise SystemExit(run(live=args.live, json_out=args.json_out, stress=args.stress))
