@@ -7,20 +7,23 @@ All notable changes to MemAssist. Format follows
 ## [1.1.0] — unreleased
 
 ### Changed
-- The assistant now answers from what it retrieves instead of asking for it
-  again. A search that returns relevant content is treated as an answer:
-  it states the substance and says where it came from, and matches by meaning
-  rather than by keyword, so a question about a "3 month goal" is answered by a
-  plan the user described over three months without ever using that word. It
-  asks the user only for things it could not retrieve.
+- The system prompt now directs the assistant to answer from what it retrieves
+  instead of asking for it again: treat a search that returns relevant content
+  as an answer, match by meaning rather than by keyword, and ask the user only
+  for what could not be retrieved.
 - Goals, deadlines, projects and commitments are now saved as durable facts
   alongside identity and preferences — the short form to core memory, the
   detail to archival.
-- Replies drawn from memory are attributed ("you told me on 12 June"), so a
-  remembered fact is distinguishable from an assumed one.
-- The system prompt carries today's date, which lets the assistant say whether
-  a stored deadline has passed and reason from a date the user supplies
+- The assistant is directed to attribute replies drawn from memory ("you told
+  me on 12 June"), so a remembered fact is distinguishable from an assumed one.
+- The system prompt carries today's date, so the assistant can reason about
+  whether a stored deadline has passed, and from a date the user supplies
   ("it's mid-September — what did I miss?").
+- Those four are prompt-level changes, and how reliably a model follows them
+  varies by provider. Benchmark tier T12 measures it: 10/10 on one free-tier
+  model, 3/10 on another, with the same memory and the same prompt. Read them
+  as instructions the system now gives, not as behaviour it can promise on
+  every provider. Numbers and detail in BENCHMARKS.md.
 - The provider transport now leaves **all** retrying to the router. The
   OpenAI SDK was retrying rate-limited requests underneath it, so the router's
   "this provider is busy, use the next one" could not happen until the SDK had
@@ -31,10 +34,12 @@ All notable changes to MemAssist. Format follows
   note in `.env.example` explains what it trades against.
 
 ### Added
-- Benchmark tier T12, memory utilization (10 points, ceiling 125). Unlike
-  T1–T11 it needs a live provider, because it grades a decision the model
-  makes; it is skipped when no key is present and the ceiling falls back to
-  115, so CI stays offline and reproducible.
+- Benchmark tier T12, memory utilization (10 points). Unlike T1–T11 it needs a
+  live provider, because it grades a decision the model makes. It registers
+  only when `MEMASSIST_BENCH_LIVE=1` and the pinned provider has a key;
+  otherwise the tier does not exist and the ceiling is 115, so CI stays
+  offline, reproducible, and free. Its score is provider-dependent and is not
+  a regression gate on its own.
 
 ### Fixed
 - A turn could end in silence. The assistant could spend every tool round

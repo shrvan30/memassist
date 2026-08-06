@@ -1027,6 +1027,10 @@ def _t12_turn(mem, question: str, attempts: int = 3, pause: float = 20.0) -> str
             max_heartbeats=5,
         )
         reply = " ".join(loop.step(question)).strip()
+        # Which model actually answered. A T12 score is only interpretable
+        # alongside the provider that produced it, and the run is otherwise
+        # silent about that — leaving old results unattributable after the fact.
+        print(f"    [T12] served_by={loop.served_by or 'none'} attempt={attempt + 1}")
         if PROVIDERS_EXHAUSTED_MESSAGE[:40] not in reply:
             return reply
         if attempt < attempts - 1:
