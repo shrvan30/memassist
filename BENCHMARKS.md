@@ -2,13 +2,15 @@
 
 ## Result
 
-**125 / 125 on both storage backends** — SQLite + Chroma and Postgres + pgvector
-score identically, which is the point of running both. `pytest`: 251 passed
-(Postgres) / 231 passed + 20 skipped (SQLite, where the Postgres tests skip
-rather than silently pass).
+**115 / 115 deterministic, on both storage backends** — SQLite + Chroma and
+Postgres + pgvector score identically, which is the point of running both.
+`pytest`: 251 passed (Postgres) / 231 passed + 20 skipped (SQLite, where the
+Postgres tests skip rather than silently pass).
 
-Of that, **115 points are offline and deterministic** and 10 (T12) require a
-live provider. T12 is opt-in: a plain run scores out of 115 and spends nothing.
+The remaining 10 points are T12, which needs a live provider and **does not
+score the same on every provider** — 10/10 on one, 3/10 on another. There is no
+single "125/125" to report; see [Live T12 results](#live-t12-results). T12 is
+opt-in, so a plain run scores out of 115 and spends nothing.
 
 ```bash
 make bench                            # the scored offline suite, out of 115
@@ -88,6 +90,49 @@ regardless of how good the model is.
 Because the score depends on the pinned model's instruction-following, T12 is a
 measurement of the whole system rather than of the memory layer alone. Treat a
 T12 regression as a prompt or model question first.
+
+### Live T12 results
+
+| Pinned provider | Score | Detail |
+|---|---|---|
+| `openrouter` (`inclusionai/ling-3.0-flash:free`) | **10 / 10** | measured during development |
+| `gemini` (`gemini-2.5-flash-lite`) | **3 / 10** | three consecutive runs, same result each time: T12a and T12b failed on content, T12c passed |
+
+Both numbers are real and neither is the number. **T12a and T12b grade live
+model reasoning, and they are provider-sensitive**: the same memory, the same
+prompt and the same stored facts produce a passing answer on one free-tier model
+and a failing one on another. A T12 score describes the pair — this system and
+that model — not the memory layer on its own. Runs now print `served_by` per
+turn so a score can be attributed to a provider after the fact.
+
+Two things did not vary. The score was identical across all three gemini runs,
+so the failures are the model's behaviour rather than a flaky harness. And **the
+liveness guarantee held in every run**: the fallback fired where it was needed
+and no run produced an empty reply. That property is enforced in code and
+covered by deterministic tests, so it does not depend on which provider is
+pinned — the one T12-adjacent claim that is not provider-sensitive.
+
+**Known brittleness: the grading is substring matching.** A verdict is a pure
+function of the reply text, which is what makes it reproducible, but it means a
+correct answer phrased unexpectedly scores zero — `_ATTRIBUTION` is a fixed
+phrase list, and the content checks look for literal fragments such as
+`"lean bulk"`. Some part of the 3/10 may be phrasing rather than reasoning; the
+current grader cannot tell those apart. Queued for v1.2.
+
+### The "gemini 401" at startup
+
+Every run prints, before any check output:
+
+```
+Provider 'gemini' disabled for this process: [gemini] auth error (HTTP 401)
+```
+
+**This is not a live call and says nothing about your API key.** It comes from
+`t1b_auth_error_skips_without_cooldown`, which scripts a fake 401 to prove a bad
+key is skipped without a cooldown — the router logs the disabling at ERROR
+level, and that log line reaches the console. Verified by running the suite with
+`--network none`: the banner still appears and the score is still 115/115, which
+it could not be if a network request were involved.
 
 ## Running against Postgres
 
