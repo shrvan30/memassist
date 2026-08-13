@@ -12,7 +12,7 @@ number that drifts for reasons unrelated to the source would corrupt the one
 guarantee the scored suite has — that a delta is attributable to a change. So
 the stress tier reports, and a human reads it.
 
-Findings live in BENCHMARKS.md.
+Findings live in docs/benchmarks.md.
 """
 
 from __future__ import annotations
@@ -380,7 +380,7 @@ SCENARIOS = [
 
 
 def run_stress(tmp: Path, make_memory, make_loop) -> list[str]:
-    lines = ["", "Stress tier (NOT scored — findings recorded in BENCHMARKS.md)", "-" * 62]
+    lines = ["", "Stress tier (NOT scored — findings recorded in docs/benchmarks.md)", "-" * 62]
     for sid, title, fn in SCENARIOS:
         lines.append(f"\n{sid} {title}")
         try:
