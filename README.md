@@ -1,151 +1,95 @@
 # MemAssist
 
-[![CI](https://github.com/shrvan30/memassist/actions/workflows/ci.yml/badge.svg)](https://github.com/shrvan30/memassist/actions/workflows/ci.yml)
-[![bench 115/115](https://img.shields.io/badge/bench-115%2F115-brightgreen)](BENCHMARKS.md)
-[![backends](https://img.shields.io/badge/backends-sqlite%20%7C%20postgres-blue)](ARCHITECTURE.md)
-[![license MIT](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![CI](https://github.com/shrvan30/memassist/actions/workflows/ci.yml/badge.svg)](https://github.com/shrvan30/memassist/actions)
+![Benchmark](https://img.shields.io/badge/benchmark-115%2F115_deterministic-blue)
+![Release](https://img.shields.io/github/v/release/shrvan30/memassist)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-A personal assistant that remembers you between conversations. It keeps a small
-amount of information in front of the model at all times, writes the rest to a
-database, and searches that database when it needs something back — editing its
-own memory through tool calls rather than relying on a context window. It runs
-on free-tier language models from four providers and switches between them
-automatically when one is rate-limited or out of quota, so it costs nothing to
-operate.
+A personal AI assistant that remembers you between conversations by
+editing its own memory. It implements the MemGPT architecture (Packer et
+al., 2023): the context window is treated as RAM, databases as disk, and
+the model pages facts between them with tool calls. It runs at $0/month
+on four free-tier LLM providers behind a failover router, and every
+capability below is gated by a reproducible benchmark before it ships.
 
-The memory design follows [MemGPT](https://arxiv.org/abs/2310.08560)
-(Packer et al., 2023).
-
----
+> **Demo:** ![demo](docs/assets/demo.gif) — restart the stack, ask
+> "who's in my family?", and watch it answer from memory with a provider
+> badge. *(2-minute walkthrough video: link pending)*
 
 ## What it can do
 
-**Remembers facts across restarts.** Three tiers: core memory (always in front
-of the model), recall (every message, searchable), archival (long-term, searched
-by meaning). Stop the app, start it again, and it still knows.
-*`memory_server/storage/`*
+- **Remembers across restarts** in three tiers — core (always in
+  context), recall (searchable log), archival (semantic search) — with
+  provenance on every fact: `stated`, `inferred`, or `external`.
+- **Survives a full context window** — summarizes old turns to archival
+  at 70% usage; eviction is forced at 95% regardless of model
+  cooperation.
+- **Fails over across Gemini -> Groq -> OpenRouter -> Mistral
+  mid-conversation**, with persistent daily budgets and a real error
+  taxonomy (a 429 is not always a rate limit).
+- **Never returns an empty reply** — a code-level liveness guarantee.
+- **Uses external tools safely** — web search and a path-jailed
+  filesystem via MCP; every write requires human approval through a
+  suspended, resumable interrupt.
+- **Blocks prompt injection and memory poisoning** — untrusted content
+  is sanitized before the model reads it and can never write core
+  memory; tested by an injection corpus written before the defenses.
+- **Consolidates memory in the background** through a privacy gate that
+  keeps sensitive content off the wire.
+- **Runs as one command** — four health-gated services — and **scores
+  115/115 on a deterministic benchmark, on both storage backends, in CI
+  on every push** (plus a 10-point live tier).
 
-**Edits its own memory, and records where each fact came from.** Every stored
-fact is tagged `stated` (you said it), `inferred` (the model concluded it), or
-`external` (it came from the web). *`memory_server/memory_tools.py`,
-`security/guards.py`*
-
-**Searches past conversation by keyword or date range.** Malformed dates return
-an error the model can correct rather than an empty result.
-*`memory_server/storage/sqlite.py`*
-
-**Finds memories by meaning, not matching words.** "Which medication makes him
-unwell?" retrieves a note about a penicillin allergy. Embeddings are computed
-locally, so no text is sent anywhere to be indexed.
-*`memory_server/storage/embedder.py`, Chroma or pgvector*
-
-**Keeps working when the conversation outgrows the context window.** At 70%
-capacity it summarizes older turns into archival memory and drops them from the
-window; above 95% they are dropped whether or not it summarized first.
-*`agent/token_budget.py`, `graph/nodes.py`*
-
-**Switches providers mid-conversation.** Gemini → Groq → OpenRouter → Mistral,
-with per-day budget tracking that survives restarts. Each reply shows which
-provider answered it. *`llm/router.py`, `llm/budgets.py`*
-
-**Uses external tools, and asks before writing anything.** Web search and a
-filesystem restricted to one directory. Any write suspends the turn until you
-approve it in the UI. *`mcp_client.py`, `graph/nodes.py`*
-
-**Treats web content as data, not instructions.** Text fetched from the internet
-cannot write to core memory, and instruction-shaped spans in it are neutralized
-before the model reads them. Checked against a corpus of injection and
-memory-poisoning attempts. *`security/`, `security/injections/`*
-
-**Summarizes old conversation in the background, behind a privacy filter.**
-Credentials, card numbers, identifiers and anything sourced from the web are
-withheld from the summarization request, and what was withheld is reported by
-category. *`jobs/consolidate.py`, `security/sensitivity.py`*
-
-**Exposes its memory over MCP.** The six memory tools run as a server other MCP
-clients can connect to, over stdio or HTTP. *`memory_server/__main__.py`*
-
-**Runs as one command.** `docker compose up` starts four services: web, API,
-memory server, Postgres. *`docker-compose.yml`*
-
-**Scores 115/115 on a benchmark you can run yourself.** `python -m bench` is
-offline and deterministic — every model call is scripted — so the number is
-reproducible on your machine. A further 10 points (T12) grade whether the
-assistant answers from memory instead of asking you to repeat yourself; those
-need a provider key and are skipped without one. *`bench/`*
-
----
-
-## Quickstart
+## Quickstart (60 seconds)
 
 ```bash
-git clone https://github.com/shrvan30/memassist.git
-cd memassist
-cp .env.example .env          # paste one free API key — Gemini or Groq is enough
+git clone https://github.com/shrvan30/memassist && cd memassist
+cp .env.example .env     # add at least one free provider key — see docs/configuration.md
 docker compose up --build
+# open http://localhost:3000 — tell it about yourself, restart, ask again.
 ```
 
-Open <http://localhost:3000>. Tell it something about yourself, restart the
-stack, and ask it again.
+Ports taken on your machine: web `3000`, api `8000`, memory server
+`8090`, Postgres on **`15432`** (deliberately not 5432 — see
+[docs/deployment.md](docs/deployment.md)). No Docker? The SQLite+Chroma
+mode needs nothing installed — [docs/development.md](docs/development.md).
 
-Free API keys, no credit card: [Gemini](https://aistudio.google.com/apikey) ·
-[Groq](https://console.groq.com/keys) ·
-[OpenRouter](https://openrouter.ai/keys) ·
-[Mistral](https://console.mistral.ai/api-keys)
+## Documentation
 
-Ports used: 3000 (web), 8000 (API), 8090 (memory server), and 15432 for
-Postgres — not 5432, which is often already taken by another database on a
-developer machine. Override with `POSTGRES_HOST_PORT`.
+| Guide | What it answers |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | The four services, the LangGraph turn cycle, one message's full path |
+| [docs/memory.md](docs/memory.md) | The three tiers, provenance, paging and eviction, consolidation |
+| [docs/failover-router.md](docs/failover-router.md) | The provider chain, the error taxonomy, budgets, lanes |
+| [docs/security.md](docs/security.md) | The threat model: what the model reads, writes, and what leaves the machine |
+| [docs/benchmarks.md](docs/benchmarks.md) | What 115/115 means, how to run it, the live tier, honest results |
+| [docs/api.md](docs/api.md) | Endpoints, the SSE-events design, sessions and interrupts |
+| [docs/configuration.md](docs/configuration.md) | Every environment variable, with the footguns called out |
+| [docs/deployment.md](docs/deployment.md) | Compose, GHCR multi-arch images, the gated deploy pipeline, the free-tier reality |
+| [docs/development.md](docs/development.md) | Local setup, the test doctrine, what CI runs, PR conventions |
+| [docs/design-decisions.md](docs/design-decisions.md) | Why it is built this way — each decision with its trade-off |
 
-Without Docker: `pip install -e ".[dev]"`, then `make api` and `make web` —
-SQLite and Chroma, no database needed.
+`PROJECT_SPEC.md` (the original spec the system was built against) and
+`CHANGELOG.md` live at the repo root.
 
----
+## Who this is for
 
-## Configuration
+Me, daily — which is why the bugs got fixed. Anyone who wants a
+reference implementation of MemGPT-style memory that runs end-to-end for
+free. Anyone learning agent engineering — the benchmark, injection
+corpus, and these docs are written to be studied, not just run.
 
-Every setting is an environment variable with a working default;
-[`.env.example`](.env.example) lists them all. The two that matter most:
+## Roadmap (v1.2)
 
-- `MEMASSIST_POSTGRES_DSN` — set it and both the storage layer and the saved
-  turn state move to Postgres + pgvector. Unset, the app uses SQLite + Chroma
-  and requires no setup.
-- `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` — set both to record traces.
-  Unset, tracing does nothing at all.
+Robust live-tier grading · metadata-filtered retrieval + reranker ·
+structured temporal facts · SIGKILL-safe bench cleanup · distributed
+session lock for multi-replica API. Reasoning in
+[docs/design-decisions.md](docs/design-decisions.md).
 
-## Architecture
+## Authorship
 
-A LangGraph state machine runs each turn: build the prompt, check context
-pressure, call the model through the router, check the requested tool calls
-against the security rules, run them, sanitize anything external, and repeat up
-to five times before replying. Storage is either SQLite + Chroma or Postgres +
-pgvector, chosen by one environment variable, behind a single interface.
-Details in [ARCHITECTURE.md](ARCHITECTURE.md); the design it was built against
-is [PROJECT_SPEC.md](PROJECT_SPEC.md).
-
-## Benchmarks
-
-115/115 on both storage backends, measured by an offline deterministic suite
-that also runs in CI — 125/125 including the live tier, which needs a provider
-key. Tiers, method and stress-test findings: [BENCHMARKS.md](BENCHMARKS.md).
-
-## Deployment
-
-Local `docker compose` is the supported deployment.
-
-Release tags publish `linux/amd64` and `linux/arm64` images to GHCR:
-`ghcr.io/shrvan30/memassist-api` and `ghcr.io/shrvan30/memassist-web`.
-
-To run those on a server behind HTTPS and a password — including the exact
-Oracle Cloud A1 free-tier path and its caveats — see
-[deploy/README.md](deploy/README.md).
-
-## Author
-
-Built by Shravan Upadhye. Claude Code served as the implementation agent; I
-designed the architecture, wrote the specifications, built the benchmark and
-security corpus, and verified every phase against it.
-
-## License
+Built by Shravan Upadhye.
+I designed the architecture, wrote the specifications, built the
+benchmark and security corpus, and verified every phase against it.
 
 MIT — see [LICENSE](LICENSE).
