@@ -1,4 +1,4 @@
-"""LangGraph orchestration for the MemGPT turn cycle (PROJECT_SPEC.md §4).
+"""LangGraph orchestration for the MemGPT turn cycle (docs/architecture.md).
 
 The graph owns CONTROL FLOW only. Providers stay behind ``llm/router.py``,
 storage stays behind the memory interface, and the UI is untouched:

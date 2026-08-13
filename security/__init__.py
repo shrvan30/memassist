@@ -1,4 +1,4 @@
-"""AI security layer (PROJECT_SPEC.md §6).
+"""AI security layer (docs/security.md).
 
 Two modules, two different jobs:
 

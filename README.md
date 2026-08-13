@@ -69,9 +69,6 @@ mode needs nothing installed — [docs/development.md](docs/development.md).
 | [docs/development.md](docs/development.md) | Local setup, the test doctrine, what CI runs, PR conventions |
 | [docs/design-decisions.md](docs/design-decisions.md) | Why it is built this way — each decision with its trade-off |
 
-`PROJECT_SPEC.md` (the original spec the system was built against) and
-`CHANGELOG.md` live at the repo root.
-
 ## Who this is for
 
 Me, daily — which is why the bugs got fixed. Anyone who wants a
